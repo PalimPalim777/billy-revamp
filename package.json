@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "description": "Multi-user E2EE knowledge capture — post-Beta revamp",
-  "engines": {
-    "node": ">=20"
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
   }
 }

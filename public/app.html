@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#111111">
-  <title>Billy</title>
+  <title>Billy — App</title>
   <style>
     * { box-sizing: border-box; }
     html, body {
@@ -27,7 +27,7 @@
       text-align: center;
     }
     h1 {
-      font-size: 32px;
+      font-size: 24px;
       font-weight: 600;
       margin: 0 0 12px;
       letter-spacing: -0.02em;
@@ -36,36 +36,32 @@
       font-size: 16px;
       line-height: 1.5;
       color: #555;
-      margin: 0 0 24px;
+      margin: 0 0 16px;
     }
-    .btn {
-      display: inline-block;
-      padding: 12px 20px;
-      background: #111;
-      color: #fff;
-      text-decoration: none;
-      border-radius: 8px;
-      font-size: 15px;
-      font-weight: 500;
-    }
-    .btn:hover { background: #000; }
+    a { color: #111; }
+    #content { display: none; }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Billy</h1>
-    <p>Multi-user revamp</p>
-    <a class="btn" href="/api/auth/google/start">Sign in with Google</a>
+  <main id="content">
+    <h1 id="signed-in">Signed in</h1>
+    <p>Account identity established. Milestone 1.2.</p>
+    <p><a href="/api/auth/logout">Sign out</a></p>
   </main>
   <script>
     fetch('/api/me', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        if (data && data.authenticated) {
-          window.location.replace('/app');
+        if (!data || !data.authenticated) {
+          window.location.replace('/');
+          return;
         }
+        document.getElementById('signed-in').textContent = 'Signed in as ' + data.email;
+        document.getElementById('content').style.display = 'block';
       })
-      .catch(function () {});
+      .catch(function () {
+        window.location.replace('/');
+      });
   </script>
 </body>
 </html>
