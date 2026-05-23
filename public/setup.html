@@ -283,7 +283,7 @@
           const j = await r.json().catch(() => ({}));
           throw new Error(j.error || ('HTTP ' + r.status));
         }
-        setSessionDEK(dek);
+        await setSessionDEK(dek);
         window.location.replace('/app');
       } catch (e) {
         confirmErr.textContent = 'Could not save: ' + (e && e.message ? e.message : String(e));
