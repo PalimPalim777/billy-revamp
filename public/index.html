@@ -61,9 +61,16 @@
     fetch('/api/me', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        if (data && data.authenticated) {
-          window.location.replace('/app');
-        }
+        if (!data || !data.authenticated) return;
+        return fetch('/api/crypto/get-wrapped', { credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(function (w) {
+            if (w && w.setup_complete === false) {
+              window.location.replace('/setup');
+            } else {
+              window.location.replace('/app');
+            }
+          });
       })
       .catch(function () {});
   </script>

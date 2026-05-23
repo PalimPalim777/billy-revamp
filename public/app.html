@@ -40,28 +40,47 @@
     }
     a { color: #111; }
     #content { display: none; }
+    #vault-line { display: none; }
   </style>
 </head>
 <body>
   <main id="content">
     <h1 id="signed-in">Signed in</h1>
     <p>Account identity established. Milestone 1.2.</p>
-    <p><a href="/api/auth/logout">Sign out</a></p>
+    <p id="vault-line">Vault unlocked. Milestone 1.3.</p>
+    <p><a id="signout" href="/api/auth/logout">Sign out</a></p>
   </main>
-  <script>
-    fetch('/api/me', { credentials: 'same-origin' })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (!data || !data.authenticated) {
-          window.location.replace('/');
-          return;
-        }
-        document.getElementById('signed-in').textContent = 'Signed in as ' + data.email;
-        document.getElementById('content').style.display = 'block';
-      })
-      .catch(function () {
+  <script type="module">
+    import { getSessionDEK, clearSessionDEK } from '/crypto/session-dek.js';
+
+    document.getElementById('signout').addEventListener('click', (e) => {
+      e.preventDefault();
+      clearSessionDEK();
+      window.location.href = '/api/auth/logout';
+    });
+
+    try {
+      const me = await fetch('/api/me', { credentials: 'same-origin' }).then(r => r.json());
+      if (!me || !me.authenticated) {
         window.location.replace('/');
-      });
+        throw 0;
+      }
+      const wrapped = await fetch('/api/crypto/get-wrapped', { credentials: 'same-origin' }).then(r => r.json());
+      if (wrapped && wrapped.setup_complete === false) {
+        window.location.replace('/setup');
+        throw 0;
+      }
+      const dek = await getSessionDEK();
+      if (dek === null) {
+        window.location.replace('/unlock');
+        throw 0;
+      }
+      document.getElementById('signed-in').textContent = 'Signed in as ' + me.email;
+      document.getElementById('vault-line').style.display = 'block';
+      document.getElementById('content').style.display = 'block';
+    } catch (e) {
+      if (e !== 0) window.location.replace('/');
+    }
   </script>
 </body>
 </html>

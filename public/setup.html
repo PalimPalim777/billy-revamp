@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>Billy — Set up encryption</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+      background: #fafafa;
+      color: #111;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+    main { max-width: 560px; width: 100%; text-align: center; }
+    h1 { font-size: 24px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.02em; }
+    p { font-size: 15px; line-height: 1.55; color: #555; margin: 0 0 16px; }
+    .warn { background: #fff4e5; color: #6b4a00; padding: 12px 14px; border-radius: 8px; font-size: 14px; text-align: left; margin: 0 0 18px; }
+    input[type="password"], input[type="text"] {
+      width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ddd;
+      border-radius: 8px; margin: 0 0 10px; background: #fff; color: #111;
+      font-family: inherit;
+    }
+    button {
+      padding: 12px 20px; background: #111; color: #fff; border: 0; border-radius: 8px;
+      font-size: 15px; font-weight: 500; cursor: pointer; font-family: inherit;
+    }
+    button:hover:not(:disabled) { background: #000; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    button.secondary { background: #fff; color: #111; border: 1px solid #ddd; margin-right: 8px; }
+    button.secondary:hover:not(:disabled) { background: #f0f0f0; }
+    .phrase-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+      background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px;
+      margin: 0 0 16px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-align: left; font-size: 14px;
+    }
+    .phrase-grid .word { display: flex; align-items: baseline; gap: 6px; }
+    .phrase-grid .num { color: #999; min-width: 22px; text-align: right; font-size: 12px; }
+    .confirm-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 0 0 14px; }
+    .confirm-grid label { font-size: 13px; color: #555; text-align: left; }
+    .step { display: none; }
+    .step.active { display: block; }
+    .err { color: #b00020; font-size: 14px; margin: 8px 0 0; }
+    a { color: #111; }
+    #loading { color: #888; font-size: 14px; }
+    .btn-row { display: flex; gap: 8px; justify-content: center; }
+  </style>
+</head>
+<body>
+  <main>
+    <div id="loading">Loading…</div>
+
+    <section id="step1" class="step">
+      <h1>Set your password</h1>
+      <p>Your password unlocks your encrypted notes. Billy cannot reset it. If you lose it, your recovery phrase is the only way back in.</p>
+      <input id="pw1" type="password" autocomplete="new-password" placeholder="Password (min 8 characters)">
+      <input id="pw2" type="password" autocomplete="new-password" placeholder="Confirm password">
+      <div class="btn-row"><button id="pwContinue" disabled>Continue</button></div>
+      <p id="pwErr" class="err" style="display:none"></p>
+    </section>
+
+    <section id="step2" class="step">
+      <h1>Save your recovery phrase</h1>
+      <div class="warn">Write this down somewhere safe. Anyone with these 24 words can read every note in your Billy account. If you lose your password AND this phrase, your notes are permanently unreadable.</div>
+      <div id="phraseGrid" class="phrase-grid"></div>
+      <div class="btn-row">
+        <button id="copyBtn" class="secondary">Copy phrase</button>
+        <button id="savedBtn">I've saved it — continue</button>
+      </div>
+      <p id="copyMsg" class="err" style="display:none; color:#0a7d2c;"></p>
+    </section>
+
+    <section id="step3" class="step">
+      <h1>Confirm you saved it</h1>
+      <p>Enter the words at the positions below from your recovery phrase.</p>
+      <div id="confirmGrid" class="confirm-grid"></div>
+      <div class="btn-row"><button id="confirmBtn" disabled>Confirm</button></div>
+      <p style="margin-top:14px;font-size:13px"><a href="#" id="showAgain">Show phrase again</a></p>
+      <p id="confirmErr" class="err" style="display:none"></p>
+    </section>
+  </main>
+
+  <script type="module">
+    import { generateSalt, deriveKEK } from '/crypto/kdf.js';
+    import { generateDEK, wrapDEK } from '/crypto/dek.js';
+    import { generateRecoveryPhrase } from '/crypto/recovery.js';
+    import { setSessionDEK } from '/crypto/session-dek.js';
+
+    const loading = document.getElementById('loading');
+    const steps = {
+      1: document.getElementById('step1'),
+      2: document.getElementById('step2'),
+      3: document.getElementById('step3')
+    };
+
+    function show(n) {
+      loading.style.display = 'none';
+      for (const k of Object.keys(steps)) steps[k].classList.remove('active');
+      steps[n].classList.add('active');
+    }
+
+    // State held only in JS memory.
+    let password = null;
+    let phrase = null;
+    let dek = null;
+    let salt = null;
+    let wrappedByPw = null;
+    let wrappedByRec = null;
+    let confirmPositions = null;
+
+    // Initial gate: only show setup if needed.
+    try {
+      const r = await fetch('/api/crypto/get-wrapped', { credentials: 'same-origin' });
+      if (r.status === 401) { window.location.replace('/'); throw 0; }
+      const j = await r.json();
+      if (j.setup_complete) { window.location.replace('/app'); throw 0; }
+    } catch (e) {
+      if (e === 0) { /* navigating away */ } else {
+        loading.textContent = 'Failed to load. Refresh to retry.';
+        throw e;
+      }
+    }
+
+    // Step 1 wiring.
+    const pw1 = document.getElementById('pw1');
+    const pw2 = document.getElementById('pw2');
+    const pwContinue = document.getElementById('pwContinue');
+    const pwErr = document.getElementById('pwErr');
+
+    function refreshPwButton() {
+      const ok = pw1.value.length >= 8 && pw1.value === pw2.value;
+      pwContinue.disabled = !ok;
+    }
+    pw1.addEventListener('input', refreshPwButton);
+    pw2.addEventListener('input', refreshPwButton);
+
+    pwContinue.addEventListener('click', async () => {
+      pwErr.style.display = 'none';
+      pwContinue.disabled = true;
+      password = pw1.value;
+      try {
+        // Generate everything once.
+        salt = generateSalt();
+        const pwKek = await deriveKEK(password, salt);
+        dek = await generateDEK();
+        phrase = await generateRecoveryPhrase();
+        const recKek = await deriveKEK(phrase, salt);
+        wrappedByPw = await wrapDEK(dek, pwKek);
+        wrappedByRec = await wrapDEK(dek, recKek);
+
+        renderPhrase();
+        pickConfirmPositions();
+        show(2);
+      } catch (e) {
+        pwErr.textContent = 'Setup failed: ' + (e && e.message ? e.message : String(e));
+        pwErr.style.display = 'block';
+        pwContinue.disabled = false;
+      }
+    });
+
+    // Step 2 wiring.
+    const phraseGrid = document.getElementById('phraseGrid');
+    const copyBtn = document.getElementById('copyBtn');
+    const savedBtn = document.getElementById('savedBtn');
+    const copyMsg = document.getElementById('copyMsg');
+
+    function renderPhrase() {
+      const words = phrase.split(' ');
+      phraseGrid.innerHTML = '';
+      for (let i = 0; i < words.length; i++) {
+        const div = document.createElement('div');
+        div.className = 'word';
+        const num = document.createElement('span');
+        num.className = 'num';
+        num.textContent = String(i + 1) + '.';
+        const w = document.createElement('span');
+        w.textContent = words[i];
+        div.appendChild(num);
+        div.appendChild(w);
+        phraseGrid.appendChild(div);
+      }
+    }
+
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(phrase);
+        copyMsg.textContent = 'Copied.';
+        copyMsg.style.display = 'block';
+      } catch {
+        copyMsg.textContent = 'Could not access clipboard.';
+        copyMsg.style.color = '#b00020';
+        copyMsg.style.display = 'block';
+      }
+    });
+
+    savedBtn.addEventListener('click', () => {
+      renderConfirm();
+      show(3);
+    });
+
+    // Step 3 wiring.
+    const confirmGrid = document.getElementById('confirmGrid');
+    const confirmBtn = document.getElementById('confirmBtn');
+    const confirmErr = document.getElementById('confirmErr');
+    const showAgain = document.getElementById('showAgain');
+
+    function pickConfirmPositions() {
+      const picks = new Set();
+      const rand = new Uint32Array(3);
+      crypto.getRandomValues(rand);
+      let i = 0;
+      while (picks.size < 3) {
+        const buf = new Uint32Array(1);
+        crypto.getRandomValues(buf);
+        picks.add((buf[0] % 24) + 1);
+        i++;
+        if (i > 1000) break;
+      }
+      confirmPositions = Array.from(picks).sort((a, b) => a - b);
+    }
+
+    function renderConfirm() {
+      confirmErr.style.display = 'none';
+      confirmGrid.innerHTML = '';
+      for (const pos of confirmPositions) {
+        const wrap = document.createElement('div');
+        const label = document.createElement('label');
+        label.textContent = 'Word #' + pos;
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.autocomplete = 'off';
+        input.autocapitalize = 'none';
+        input.spellcheck = false;
+        input.dataset.pos = String(pos);
+        input.addEventListener('input', refreshConfirmButton);
+        wrap.appendChild(label);
+        wrap.appendChild(input);
+        confirmGrid.appendChild(wrap);
+      }
+      confirmBtn.disabled = true;
+    }
+
+    function refreshConfirmButton() {
+      const words = phrase.split(' ');
+      const inputs = confirmGrid.querySelectorAll('input');
+      let ok = true;
+      for (const inp of inputs) {
+        const pos = parseInt(inp.dataset.pos, 10);
+        if (inp.value.trim().toLowerCase() !== words[pos - 1]) { ok = false; break; }
+      }
+      confirmBtn.disabled = !ok;
+    }
+
+    showAgain.addEventListener('click', (e) => {
+      e.preventDefault();
+      show(2);
+    });
+
+    confirmBtn.addEventListener('click', async () => {
+      confirmErr.style.display = 'none';
+      confirmBtn.disabled = true;
+      try {
+        const r = await fetch('/api/crypto/setup', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            salt,
+            dek_wrapped_by_password: wrappedByPw.ciphertext_b64,
+            dek_wrapped_by_password_iv: wrappedByPw.iv_b64,
+            dek_wrapped_by_recovery: wrappedByRec.ciphertext_b64,
+            dek_wrapped_by_recovery_iv: wrappedByRec.iv_b64
+          })
+        });
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          throw new Error(j.error || ('HTTP ' + r.status));
+        }
+        await setSessionDEK(dek);
+        window.location.replace('/app');
+      } catch (e) {
+        confirmErr.textContent = 'Could not save: ' + (e && e.message ? e.message : String(e));
+        confirmErr.style.display = 'block';
+        confirmBtn.disabled = false;
+      }
+    });
+
+    show(1);
+  </script>
+</body>
+</html>

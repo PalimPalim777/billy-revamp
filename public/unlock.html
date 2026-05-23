@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>Billy — Unlock</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+      background: #fafafa;
+      color: #111;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+    main { max-width: 480px; width: 100%; text-align: center; }
+    h1 { font-size: 24px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.02em; }
+    p { font-size: 15px; line-height: 1.55; color: #555; margin: 0 0 16px; }
+    input[type="password"], textarea {
+      width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ddd;
+      border-radius: 8px; margin: 0 0 10px; background: #fff; color: #111;
+      font-family: inherit;
+    }
+    textarea { min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+    button {
+      padding: 12px 20px; background: #111; color: #fff; border: 0; border-radius: 8px;
+      font-size: 15px; font-weight: 500; cursor: pointer; font-family: inherit;
+    }
+    button:hover:not(:disabled) { background: #000; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    .err { color: #b00020; font-size: 14px; margin: 8px 0 0; }
+    .view { display: none; }
+    .view.active { display: block; }
+    a { color: #111; font-size: 13px; }
+    .small { font-size: 13px; margin-top: 14px; }
+    #loading { color: #888; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div id="loading">Loading…</div>
+
+    <section id="pwView" class="view">
+      <h1>Enter your password to unlock your notes</h1>
+      <input id="pw" type="password" autocomplete="current-password" placeholder="Password">
+      <div><button id="unlockBtn" disabled>Unlock</button></div>
+      <p id="pwErr" class="err" style="display:none"></p>
+      <p class="small"><a href="#" id="toRec">Lost your password? Use your recovery phrase</a></p>
+    </section>
+
+    <section id="recView" class="view">
+      <h1>Unlock with recovery phrase</h1>
+      <p>Enter your 24-word recovery phrase, words separated by single spaces.</p>
+      <textarea id="phrase" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="word1 word2 word3 ..."></textarea>
+      <div><button id="recBtn" disabled>Unlock with phrase</button></div>
+      <p id="recErr" class="err" style="display:none"></p>
+      <p class="small"><a href="#" id="toPw">Back to password</a></p>
+    </section>
+  </main>
+
+  <script type="module">
+    import { deriveKEK } from '/crypto/kdf.js';
+    import { unwrapDEK } from '/crypto/dek.js';
+    import { validateRecoveryPhrase } from '/crypto/recovery.js';
+    import { setSessionDEK } from '/crypto/session-dek.js';
+
+    const loading = document.getElementById('loading');
+    const pwView = document.getElementById('pwView');
+    const recView = document.getElementById('recView');
+
+    function show(view) {
+      loading.style.display = 'none';
+      pwView.classList.remove('active');
+      recView.classList.remove('active');
+      view.classList.add('active');
+    }
+
+    let wrapped = null;
+
+    try {
+      const me = await fetch('/api/me', { credentials: 'same-origin' }).then(r => r.json());
+      if (!me || !me.authenticated) { window.location.replace('/'); throw 0; }
+      const r = await fetch('/api/crypto/get-wrapped', { credentials: 'same-origin' });
+      if (r.status === 401) { window.location.replace('/'); throw 0; }
+      const j = await r.json();
+      if (!j.setup_complete) { window.location.replace('/setup'); throw 0; }
+      wrapped = j;
+    } catch (e) {
+      if (e === 0) { /* navigating */ } else {
+        loading.textContent = 'Failed to load. Refresh to retry.';
+        throw e;
+      }
+    }
+
+    // Password view.
+    const pw = document.getElementById('pw');
+    const unlockBtn = document.getElementById('unlockBtn');
+    const pwErr = document.getElementById('pwErr');
+
+    pw.addEventListener('input', () => { unlockBtn.disabled = pw.value.length === 0; });
+
+    async function tryPassword() {
+      pwErr.style.display = 'none';
+      unlockBtn.disabled = true;
+      try {
+        const kek = await deriveKEK(pw.value, wrapped.salt);
+        const dek = await unwrapDEK(
+          wrapped.dek_wrapped_by_password,
+          wrapped.dek_wrapped_by_password_iv,
+          kek
+        );
+        await setSessionDEK(dek);
+        window.location.replace('/app');
+      } catch {
+        pwErr.textContent = 'Wrong password.';
+        pwErr.style.display = 'block';
+        unlockBtn.disabled = pw.value.length === 0;
+      }
+    }
+
+    unlockBtn.addEventListener('click', tryPassword);
+    pw.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !unlockBtn.disabled) tryPassword();
+    });
+
+    // Recovery view.
+    const phraseEl = document.getElementById('phrase');
+    const recBtn = document.getElementById('recBtn');
+    const recErr = document.getElementById('recErr');
+
+    phraseEl.addEventListener('input', () => {
+      recBtn.disabled = phraseEl.value.trim().length === 0;
+    });
+
+    async function tryRecovery() {
+      recErr.style.display = 'none';
+      recBtn.disabled = true;
+      const phrase = phraseEl.value.trim().toLowerCase().replace(/\s+/g, ' ');
+      try {
+        const valid = await validateRecoveryPhrase(phrase);
+        if (!valid) throw new Error('invalid');
+        const kek = await deriveKEK(phrase, wrapped.salt);
+        const dek = await unwrapDEK(
+          wrapped.dek_wrapped_by_recovery,
+          wrapped.dek_wrapped_by_recovery_iv,
+          kek
+        );
+        await setSessionDEK(dek);
+        window.location.replace('/app');
+      } catch {
+        recErr.textContent = 'Wrong phrase or phrase is corrupted.';
+        recErr.style.display = 'block';
+        recBtn.disabled = phraseEl.value.trim().length === 0;
+      }
+    }
+
+    recBtn.addEventListener('click', tryRecovery);
+
+    document.getElementById('toRec').addEventListener('click', (e) => {
+      e.preventDefault();
+      show(recView);
+    });
+    document.getElementById('toPw').addEventListener('click', (e) => {
+      e.preventDefault();
+      show(pwView);
+    });
+
+    show(pwView);
+  </script>
+</body>
+</html>

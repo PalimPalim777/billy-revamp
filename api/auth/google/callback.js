@@ -117,7 +117,7 @@ module.exports = async function handler(req, res) {
     );
 
     res.statusCode = 302;
-    res.setHeader('Location', '/app');
+    res.setHeader('Location', '/');
     res.end();
   } catch (err) {
     res.statusCode = 500;
