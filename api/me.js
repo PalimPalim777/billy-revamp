@@ -9,8 +9,8 @@ module.exports = function handler(req, res) {
   res.setHeader('Content-Type', 'application/json');
   res.statusCode = 200;
 
-  if (payload && payload.uid && payload.email) {
-    res.end(JSON.stringify({ authenticated: true, email: payload.email, uid: payload.uid }));
+  if (payload && payload.uid && payload.username) {
+    res.end(JSON.stringify({ authenticated: true, username: payload.username, uid: payload.uid }));
   } else {
     res.end(JSON.stringify({ authenticated: false }));
   }

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>Billy — Sign up</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+      background: #fafafa;
+      color: #111;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+    main { max-width: 400px; width: 100%; text-align: center; }
+    h1 { font-size: 24px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.02em; }
+    .help { font-size: 13px; color: #888; margin: 0 0 20px; }
+    input[type="text"] {
+      width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ddd;
+      border-radius: 8px; margin: 0 0 8px; background: #fff; color: #111;
+      font-family: inherit;
+    }
+    input[type="text"]:focus { outline: none; border-color: #999; }
+    .status { font-size: 13px; min-height: 18px; margin: 0 0 16px; text-align: left; }
+    .status.ok { color: #0a7d2c; }
+    .status.err { color: #b00020; }
+    .chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 0; }
+    .chip {
+      padding: 4px 10px; border: 1px solid #ddd; border-radius: 20px;
+      font-size: 13px; cursor: pointer; background: #fff; font-family: inherit;
+    }
+    .chip:hover { background: #f0f0f0; border-color: #bbb; }
+    button {
+      width: 100%; padding: 12px 20px; background: #111; color: #fff; border: 0;
+      border-radius: 8px; font-size: 15px; font-weight: 500; cursor: pointer;
+      font-family: inherit;
+    }
+    button:hover:not(:disabled) { background: #000; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    .signin-link { margin-top: 20px; font-size: 13px; color: #888; }
+    .signin-link a { color: #111; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Create your account</h1>
+    <p class="help">3–20 characters, lowercase letters, numbers, underscore or hyphen</p>
+    <input id="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Username">
+    <div id="status" class="status"></div>
+    <button id="continueBtn" disabled>Continue</button>
+    <p class="signin-link">Already have an account? <a href="/login">Sign in</a></p>
+  </main>
+
+  <script>
+    const input = document.getElementById('username');
+    const statusEl = document.getElementById('status');
+    const continueBtn = document.getElementById('continueBtn');
+
+    let debounceTimer = null;
+    let lastChecked = '';
+    let isAvailable = false;
+
+    input.addEventListener('input', () => {
+      input.value = input.value.toLowerCase();
+      isAvailable = false;
+      continueBtn.disabled = true;
+      clearTimeout(debounceTimer);
+      const val = input.value;
+      if (!val) {
+        statusEl.textContent = '';
+        statusEl.className = 'status';
+        return;
+      }
+      statusEl.textContent = 'Checking…';
+      statusEl.className = 'status';
+      debounceTimer = setTimeout(() => checkUsername(val), 400);
+    });
+
+    async function checkUsername(name) {
+      lastChecked = name;
+      try {
+        const r = await fetch('/api/auth/check-username?u=' + encodeURIComponent(name));
+        if (name !== lastChecked) return; // stale
+        const data = await r.json();
+        if (name !== lastChecked) return;
+        applyStatus(name, data);
+      } catch {
+        if (name !== lastChecked) return;
+        statusEl.textContent = 'Could not check availability.';
+        statusEl.className = 'status err';
+      }
+    }
+
+    function applyStatus(name, data) {
+      statusEl.innerHTML = '';
+      statusEl.className = 'status';
+      if (data.available) {
+        statusEl.textContent = '✓ Available';
+        statusEl.className = 'status ok';
+        isAvailable = true;
+        continueBtn.disabled = false;
+        return;
+      }
+      isAvailable = false;
+      continueBtn.disabled = true;
+      if (data.reason === 'taken') {
+        const msg = document.createTextNode('✗ Already taken');
+        statusEl.appendChild(msg);
+        if (data.suggestions && data.suggestions.length) {
+          const chips = document.createElement('div');
+          chips.className = 'chips';
+          for (const s of data.suggestions) {
+            const chip = document.createElement('button');
+            chip.className = 'chip';
+            chip.textContent = s;
+            chip.type = 'button';
+            chip.addEventListener('click', () => {
+              input.value = s;
+              lastChecked = '';
+              isAvailable = false;
+              continueBtn.disabled = true;
+              statusEl.textContent = 'Checking…';
+              statusEl.className = 'status';
+              checkUsername(s);
+            });
+            chips.appendChild(chip);
+          }
+          statusEl.appendChild(chips);
+        }
+      } else {
+        statusEl.textContent = '✗ ' + (data.reason || 'invalid');
+        statusEl.className = 'status err';
+      }
+    }
+
+    continueBtn.addEventListener('click', async () => {
+      if (!isAvailable) return;
+      continueBtn.disabled = true;
+      try {
+        const r = await fetch('/api/auth/signup', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: input.value })
+        });
+        if (r.status === 409) {
+          // race: someone took it just now — re-check
+          isAvailable = false;
+          await checkUsername(input.value);
+          return;
+        }
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          statusEl.textContent = '✗ ' + (j.error || 'Signup failed');
+          statusEl.className = 'status err';
+          continueBtn.disabled = false;
+          return;
+        }
+        window.location.replace('/setup');
+      } catch {
+        statusEl.textContent = 'Network error. Please try again.';
+        statusEl.className = 'status err';
+        continueBtn.disabled = !isAvailable;
+      }
+    });
+  </script>
+</body>
+</html>

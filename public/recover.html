@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>Billy — Account recovery</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+      background: #fafafa;
+      color: #111;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+    main { max-width: 480px; width: 100%; text-align: center; }
+    h1 { font-size: 24px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.02em; }
+    p { font-size: 15px; line-height: 1.55; color: #555; margin: 0 0 16px; }
+    input[type="text"] {
+      width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ddd;
+      border-radius: 8px; margin: 0 0 10px; background: #fff; color: #111;
+      font-family: inherit;
+    }
+    input:focus { outline: none; border-color: #999; }
+    textarea {
+      width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ddd;
+      border-radius: 8px; margin: 0 0 10px; background: #fff; color: #111;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      min-height: 100px; resize: vertical;
+    }
+    textarea:focus { outline: none; border-color: #999; }
+    button {
+      width: 100%; padding: 12px 20px; background: #111; color: #fff; border: 0;
+      border-radius: 8px; font-size: 15px; font-weight: 500; cursor: pointer;
+      font-family: inherit;
+    }
+    button:hover:not(:disabled) { background: #000; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    .err { color: #b00020; font-size: 14px; margin: 10px 0 0; display: none; }
+    .links { margin-top: 20px; font-size: 13px; }
+    .links a { color: #111; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Account recovery</h1>
+    <p>Enter your username and 24-word recovery phrase to regain access.</p>
+    <input id="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Username">
+    <textarea id="phrase" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="word1 word2 word3 …"></textarea>
+    <button id="recoverBtn" disabled>Recover account</button>
+    <p id="err" class="err"></p>
+    <p class="links"><a href="/login">Back to sign in</a></p>
+  </main>
+
+  <script type="module">
+    import { deriveKEK } from '/crypto/kdf.js';
+    import { unwrapDEK } from '/crypto/dek.js';
+    import { validateRecoveryPhrase } from '/crypto/recovery.js';
+    import { setSessionDEK } from '/crypto/session-dek.js';
+
+    const usernameEl = document.getElementById('username');
+    const phraseEl = document.getElementById('phrase');
+    const recoverBtn = document.getElementById('recoverBtn');
+    const errEl = document.getElementById('err');
+
+    function refreshBtn() {
+      recoverBtn.disabled = !usernameEl.value.trim() || !phraseEl.value.trim();
+    }
+
+    usernameEl.addEventListener('input', () => {
+      usernameEl.value = usernameEl.value.toLowerCase();
+      refreshBtn();
+    });
+    phraseEl.addEventListener('input', refreshBtn);
+
+    function showErr(msg) {
+      errEl.textContent = msg;
+      errEl.style.display = 'block';
+    }
+
+    recoverBtn.addEventListener('click', async () => {
+      errEl.style.display = 'none';
+      const username = usernameEl.value.trim();
+      const phrase = phraseEl.value.trim().toLowerCase().replace(/\s+/g, ' ');
+
+      recoverBtn.disabled = true;
+      try {
+        // Fetch wrapped DEK bundle by username without requiring a session.
+        const r = await fetch('/api/crypto/get-wrapped?u=' + encodeURIComponent(username));
+        if (r.status === 404) {
+          showErr('No account with that username.');
+          return;
+        }
+        if (!r.ok) {
+          showErr('Could not load account data. Please try again.');
+          return;
+        }
+        const bundle = await r.json();
+        if (!bundle.setup_complete) {
+          showErr('This account has no encryption set up yet.');
+          return;
+        }
+
+        const valid = await validateRecoveryPhrase(phrase);
+        if (!valid) {
+          showErr('Recovery phrase format is invalid.');
+          return;
+        }
+
+        let dek;
+        try {
+          const kek = await deriveKEK(phrase, bundle.salt);
+          dek = await unwrapDEK(
+            bundle.dek_wrapped_by_recovery,
+            bundle.dek_wrapped_by_recovery_iv,
+            kek
+          );
+        } catch {
+          showErr('Wrong recovery phrase.');
+          return;
+        }
+
+        // Phrase verified — establish a session, then enter the app.
+        const loginResp = await fetch('/api/auth/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username })
+        });
+        if (!loginResp.ok) {
+          showErr('Could not establish session. Please try signing in normally.');
+          return;
+        }
+
+        await setSessionDEK(dek);
+        window.location.replace('/app');
+      } catch {
+        showErr('Network error. Please try again.');
+      } finally {
+        recoverBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>Billy — Sign in</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+      background: #fafafa;
+      color: #111;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+    main { max-width: 400px; width: 100%; text-align: center; }
+    h1 { font-size: 24px; font-weight: 600; margin: 0 0 20px; letter-spacing: -0.02em; }
+    input[type="text"], input[type="password"] {
+      width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ddd;
+      border-radius: 8px; margin: 0 0 10px; background: #fff; color: #111;
+      font-family: inherit;
+    }
+    input:focus { outline: none; border-color: #999; }
+    button {
+      width: 100%; padding: 12px 20px; background: #111; color: #fff; border: 0;
+      border-radius: 8px; font-size: 15px; font-weight: 500; cursor: pointer;
+      font-family: inherit; margin-top: 4px;
+    }
+    button:hover:not(:disabled) { background: #000; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    .err { color: #b00020; font-size: 14px; margin: 10px 0 0; display: none; }
+    .links { margin-top: 20px; font-size: 13px; color: #888; }
+    .links a { color: #111; display: block; margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sign in</h1>
+    <input id="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Username">
+    <input id="password" type="password" autocomplete="current-password" placeholder="Password">
+    <button id="signinBtn">Sign in</button>
+    <p id="err" class="err"></p>
+    <div class="links">
+      <a href="/recover">Forgot password? Use recovery phrase</a>
+      <a href="/signup">Don't have an account? Sign up</a>
+    </div>
+  </main>
+
+  <script type="module">
+    import { deriveKEK } from '/crypto/kdf.js';
+    import { unwrapDEK } from '/crypto/dek.js';
+    import { setSessionDEK } from '/crypto/session-dek.js';
+
+    const usernameEl = document.getElementById('username');
+    const passwordEl = document.getElementById('password');
+    const signinBtn = document.getElementById('signinBtn');
+    const errEl = document.getElementById('err');
+
+    function showErr(msg) {
+      errEl.textContent = msg;
+      errEl.style.display = 'block';
+    }
+
+    function clearErr() {
+      errEl.style.display = 'none';
+    }
+
+    async function doSignIn() {
+      clearErr();
+      const username = usernameEl.value.toLowerCase().trim();
+      const password = passwordEl.value;
+      if (!username || !password) return;
+
+      signinBtn.disabled = true;
+      try {
+        const r = await fetch('/api/auth/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username })
+        });
+
+        if (r.status === 404) {
+          showErr('No account with that username.');
+          return;
+        }
+        if (r.status === 409) {
+          showErr('Account setup is incomplete for this username. Please sign up again or contact support.');
+          return;
+        }
+        if (!r.ok) {
+          showErr('Sign in failed. Please try again.');
+          return;
+        }
+
+        const bundle = await r.json();
+
+        // Verify password client-side by attempting DEK unwrap (AES-GCM authenticated decrypt).
+        // The server does not check the password; a wrong password will fail here.
+        try {
+          const kek = await deriveKEK(password, bundle.salt);
+          const dek = await unwrapDEK(
+            bundle.dek_wrapped_by_password,
+            bundle.dek_wrapped_by_password_iv,
+            kek
+          );
+          await setSessionDEK(dek);
+          window.location.replace('/app');
+        } catch {
+          showErr('Wrong password.');
+          // Clear the server-issued session since the password was wrong.
+          fetch('/api/auth/logout', { credentials: 'same-origin' }).catch(() => {});
+        }
+      } catch {
+        showErr('Network error. Please try again.');
+      } finally {
+        signinBtn.disabled = false;
+      }
+    }
+
+    signinBtn.addEventListener('click', doSignIn);
+    passwordEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doSignIn();
+    });
+    usernameEl.addEventListener('input', () => {
+      usernameEl.value = usernameEl.value.toLowerCase();
+    });
+  </script>
+</body>
+</html>

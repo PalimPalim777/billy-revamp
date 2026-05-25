@@ -2,6 +2,9 @@
   "rewrites": [
     { "source": "/app", "destination": "/app.html" },
     { "source": "/setup", "destination": "/setup.html" },
-    { "source": "/unlock", "destination": "/unlock.html" }
+    { "source": "/unlock", "destination": "/unlock.html" },
+    { "source": "/signup", "destination": "/signup.html" },
+    { "source": "/login", "destination": "/login.html" },
+    { "source": "/recover", "destination": "/recover.html" }
   ]
 }

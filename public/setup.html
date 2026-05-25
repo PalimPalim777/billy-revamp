@@ -56,6 +56,7 @@
 <body>
   <main>
     <div id="loading">Loading…</div>
+    <p id="setup-header" style="display:none; font-size:14px; color:#888; margin:0 0 16px;">Setting up account: <strong id="setup-username"></strong></p>
 
     <section id="step1" class="step">
       <h1>Set your password</h1>
@@ -117,10 +118,18 @@
 
     // Initial gate: only show setup if needed.
     try {
-      const r = await fetch('/api/crypto/get-wrapped', { credentials: 'same-origin' });
-      if (r.status === 401) { window.location.replace('/'); throw 0; }
-      const j = await r.json();
+      const [meResp, wrappedResp] = await Promise.all([
+        fetch('/api/me', { credentials: 'same-origin' }),
+        fetch('/api/crypto/get-wrapped', { credentials: 'same-origin' })
+      ]);
+      if (wrappedResp.status === 401) { window.location.replace('/'); throw 0; }
+      const me = await meResp.json();
+      const j = await wrappedResp.json();
       if (j.setup_complete) { window.location.replace('/app'); throw 0; }
+      if (me && me.username) {
+        document.getElementById('setup-username').textContent = me.username;
+        document.getElementById('setup-header').style.display = 'block';
+      }
     } catch (e) {
       if (e === 0) { /* navigating away */ } else {
         loading.textContent = 'Failed to load. Refresh to retry.';
