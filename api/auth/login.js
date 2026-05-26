@@ -64,7 +64,7 @@ module.exports = async function handler(req, res) {
 
   const { data, error } = await supabase
     .from('users')
-    .select('id, salt, kdf_version, dek_wrapped_by_password, dek_wrapped_by_password_iv, password_check_ciphertext, password_check_iv, password_check_auth_tag')
+    .select('id, salt, kdf_version, dek_wrapped_by_password, dek_wrapped_by_password_iv, dek_wrapped_by_recovery, dek_wrapped_by_recovery_iv')
     .eq('username', username)
     .maybeSingle();
 
@@ -96,9 +96,6 @@ module.exports = async function handler(req, res) {
     salt: data.salt,
     kdf_version: data.kdf_version,
     dek_wrapped_by_password: data.dek_wrapped_by_password,
-    dek_wrapped_by_password_iv: data.dek_wrapped_by_password_iv,
-    password_check_ciphertext: data.password_check_ciphertext,
-    password_check_iv: data.password_check_iv,
-    password_check_auth_tag: data.password_check_auth_tag
+    dek_wrapped_by_password_iv: data.dek_wrapped_by_password_iv
   }));
 };
