@@ -38,24 +38,42 @@
       color: #555;
       margin: 0 0 24px;
     }
+    .cta-row {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+    }
     .btn {
       display: inline-block;
-      padding: 12px 20px;
-      background: #111;
-      color: #fff;
-      text-decoration: none;
+      padding: 12px 28px;
       border-radius: 8px;
       font-size: 15px;
       font-weight: 500;
+      text-decoration: none;
+      flex: 1;
+      max-width: 160px;
     }
-    .btn:hover { background: #000; }
+    .btn-primary {
+      background: #111;
+      color: #fff;
+    }
+    .btn-primary:hover { background: #000; }
+    .btn-secondary {
+      background: #fff;
+      color: #111;
+      border: 1px solid #ddd;
+    }
+    .btn-secondary:hover { background: #f0f0f0; }
   </style>
 </head>
 <body>
   <main>
     <h1>Billy</h1>
     <p>Multi-user revamp</p>
-    <a class="btn" href="/api/auth/google/start">Sign in with Google</a>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="/signup">Sign up</a>
+      <a class="btn btn-secondary" href="/login">Sign in</a>
+    </div>
   </main>
   <script>
     fetch('/api/me', { credentials: 'same-origin' })
