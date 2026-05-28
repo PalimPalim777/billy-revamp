@@ -7,11 +7,7 @@
   <title>Billy — App</title>
   <style>
     * { box-sizing: border-box; }
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-    }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
       background: #fafafa;
@@ -22,64 +18,238 @@
       padding: 24px;
       -webkit-font-smoothing: antialiased;
     }
-    main {
-      max-width: 480px;
-      text-align: center;
+    main { max-width: 480px; width: 100%; text-align: center; }
+    h1 { font-size: 24px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.02em; }
+    p { font-size: 16px; line-height: 1.5; color: #555; margin: 0 0 16px; }
+    a { color: #111; font-size: 13px; }
+    input[type="text"], input[type="password"] {
+      width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ddd;
+      border-radius: 8px; margin: 0 0 10px; background: #fff; color: #111;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
-    h1 {
-      font-size: 24px;
-      font-weight: 600;
-      margin: 0 0 12px;
-      letter-spacing: -0.02em;
+    button {
+      padding: 12px 20px; background: #111; color: #fff; border: 0; border-radius: 8px;
+      font-size: 15px; font-weight: 500; cursor: pointer; font-family: inherit;
     }
-    p {
-      font-size: 16px;
-      line-height: 1.5;
-      color: #555;
-      margin: 0 0 16px;
-    }
-    a { color: #111; }
-    #content { display: none; }
-    #vault-line { display: none; }
+    button:hover:not(:disabled) { background: #000; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    .row { display: flex; gap: 8px; align-items: center; justify-content: center; }
+    .toggle { background: transparent; color: #555; border: 1px solid #ddd; padding: 11px 12px; }
+    .toggle:hover:not(:disabled) { background: #f0f0f0; }
+    .err { color: #b00020; font-size: 14px; margin: 8px 0 0; }
+    .status { color: #888; font-size: 14px; margin: 8px 0 0; }
+    .connected { color: #1a7f37; font-size: 14px; margin-top: 8px; }
+    .view { display: none; }
+    .view.active { display: block; }
+    #loading { color: #888; font-size: 14px; }
+    .small { font-size: 13px; margin-top: 18px; }
   </style>
 </head>
 <body>
-  <main id="content">
-    <h1 id="signed-in">Signed in</h1>
-    <p>Account identity established. Milestone 1.2.</p>
-    <p id="vault-line">Vault unlocked. Milestone 1.3.</p>
-    <p><a id="signout" href="/api/auth/logout">Sign out</a></p>
+  <main>
+    <div id="loading">Loading…</div>
+
+    <section id="onboardView" class="view">
+      <h1>Connect your Anthropic API key</h1>
+      <p>Billy uses your own Anthropic key. It's encrypted on your device and we only
+        ever store the ciphertext — never the key itself.</p>
+      <div class="row">
+        <input id="keyInput" type="password" autocomplete="off" autocapitalize="none"
+               spellcheck="false" placeholder="sk-ant-...">
+        <button id="toggleKey" class="toggle" type="button">Show</button>
+      </div>
+      <div><button id="saveBtn" disabled>Validate &amp; save</button></div>
+      <p id="onboardStatus" class="status" style="display:none"></p>
+      <p id="onboardErr" class="err" style="display:none"></p>
+    </section>
+
+    <section id="placeholderView" class="view">
+      <h1>Billy — you're set up.</h1>
+      <p>Capture is coming next.</p>
+      <p id="connectedLine" class="connected" style="display:none">Anthropic key connected ✓</p>
+      <p class="small"><a id="signout" href="/api/auth/logout">Sign out</a></p>
+    </section>
   </main>
+
   <script type="module">
     import { getSessionDEK, clearSessionDEK } from '/crypto/session-dek.js';
+    import { encryptStringWithDEK, decryptStringWithDEK } from '/crypto/dek.js';
+
+    // Billy's single canonical model for all LLM work (reused by callLLM in 2.3).
+    // Do not scatter model literals elsewhere.
+    const BILLY_MODEL = 'claude-sonnet-4-6';
+
+    // The decrypted plaintext Anthropic key lives ONLY here, in module memory.
+    // Never written to sessionStorage; re-derived from DEK + wrapped key each load.
+    let anthropicKey = null;
+
+    const loading = document.getElementById('loading');
+    const onboardView = document.getElementById('onboardView');
+    const placeholderView = document.getElementById('placeholderView');
+
+    function show(view) {
+      loading.style.display = 'none';
+      onboardView.classList.remove('active');
+      placeholderView.classList.remove('active');
+      view.classList.add('active');
+    }
 
     document.getElementById('signout').addEventListener('click', (e) => {
       e.preventDefault();
+      anthropicKey = null;
       clearSessionDEK();
       window.location.href = '/api/auth/logout';
     });
 
+    let dek = null;
+    let wrapped = null;
+
     try {
       const me = await fetch('/api/me', { credentials: 'same-origin' }).then(r => r.json());
-      if (!me || !me.authenticated) {
-        window.location.replace('/');
-        throw 0;
-      }
-      const wrapped = await fetch('/api/crypto/get-wrapped', { credentials: 'same-origin' }).then(r => r.json());
-      if (wrapped && wrapped.setup_complete === false) {
-        window.location.replace('/setup');
-        throw 0;
-      }
-      const dek = await getSessionDEK();
-      if (dek === null) {
-        window.location.replace('/unlock');
-        throw 0;
-      }
-      document.getElementById('signed-in').textContent = 'Signed in as ' + me.username;
-      document.getElementById('vault-line').style.display = 'block';
-      document.getElementById('content').style.display = 'block';
+      if (!me || !me.authenticated) { window.location.replace('/'); throw 0; }
+
+      wrapped = await fetch('/api/crypto/get-wrapped', { credentials: 'same-origin' }).then(r => r.json());
+      if (wrapped && wrapped.setup_complete === false) { window.location.replace('/setup'); throw 0; }
+
+      dek = await getSessionDEK();
+      if (dek === null) { window.location.replace('/unlock'); throw 0; }
     } catch (e) {
-      if (e !== 0) window.location.replace('/');
+      if (e !== 0) { loading.textContent = 'Failed to load. Refresh to retry.'; }
+      throw e;
+    }
+
+    function renderPlaceholder() {
+      document.getElementById('connectedLine').style.display = anthropicKey ? 'block' : 'none';
+      show(placeholderView);
+    }
+
+    // Already onboarded: decrypt the wrapped key into memory and skip the prompt.
+    if (wrapped.onboarding_complete && wrapped.anthropic_key_wrapped && wrapped.anthropic_key_iv) {
+      try {
+        anthropicKey = await decryptStringWithDEK(
+          wrapped.anthropic_key_wrapped,
+          wrapped.anthropic_key_iv,
+          dek
+        );
+        renderPlaceholder();
+      } catch {
+        // Wrapped key present but undecryptable with this DEK — fall back to onboarding.
+        anthropicKey = null;
+        setupOnboarding();
+      }
+    } else {
+      setupOnboarding();
+    }
+
+    function setupOnboarding() {
+      const keyInput = document.getElementById('keyInput');
+      const saveBtn = document.getElementById('saveBtn');
+      const toggleKey = document.getElementById('toggleKey');
+      const statusEl = document.getElementById('onboardStatus');
+      const errEl = document.getElementById('onboardErr');
+
+      keyInput.addEventListener('input', () => {
+        saveBtn.disabled = keyInput.value.trim().length === 0;
+      });
+
+      toggleKey.addEventListener('click', () => {
+        const showing = keyInput.type === 'text';
+        keyInput.type = showing ? 'password' : 'text';
+        toggleKey.textContent = showing ? 'Show' : 'Hide';
+      });
+
+      async function validateAndSave() {
+        const key = keyInput.value.trim();
+        if (!key) return;
+        errEl.style.display = 'none';
+        statusEl.style.display = 'block';
+        statusEl.textContent = 'Validating against ' + BILLY_MODEL + '…';
+        saveBtn.disabled = true;
+
+        // Validate with a real, minimal call DIRECTLY from the browser to Anthropic.
+        // The plaintext key never touches our server — only this request carries it.
+        let r;
+        try {
+          r = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-api-key': key,
+              'anthropic-version': '2023-06-01',
+              'anthropic-dangerous-direct-browser-access': 'true'
+            },
+            body: JSON.stringify({
+              model: BILLY_MODEL,
+              max_tokens: 1,
+              messages: [{ role: 'user', content: 'hi' }]
+            })
+          });
+        } catch {
+          statusEl.style.display = 'none';
+          errEl.textContent = "Couldn't validate the key (network error) — check your connection and try again.";
+          errEl.style.display = 'block';
+          saveBtn.disabled = keyInput.value.trim().length === 0;
+          return;
+        }
+
+        if (r.status === 401 || r.status === 403) {
+          statusEl.style.display = 'none';
+          errEl.textContent = 'That API key was rejected — check it and try again.';
+          errEl.style.display = 'block';
+          saveBtn.disabled = keyInput.value.trim().length === 0;
+          return;
+        }
+
+        if (!r.ok) {
+          statusEl.style.display = 'none';
+          errEl.textContent = "Couldn't validate the key (status " + r.status + ") — check your connection and try again.";
+          errEl.style.display = 'block';
+          saveBtn.disabled = keyInput.value.trim().length === 0;
+          return;
+        }
+
+        // Valid key. Encrypt with the DEK and persist ONLY the ciphertext.
+        statusEl.textContent = 'Saving…';
+        let saveRes;
+        try {
+          const { ciphertext_b64, iv_b64 } = await encryptStringWithDEK(key, dek);
+          saveRes = await fetch('/api/account/set-anthropic-key', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              anthropic_key_wrapped: ciphertext_b64,
+              anthropic_key_iv: iv_b64
+            })
+          });
+        } catch {
+          statusEl.style.display = 'none';
+          errEl.textContent = "Couldn't save the key — check your connection and try again.";
+          errEl.style.display = 'block';
+          saveBtn.disabled = keyInput.value.trim().length === 0;
+          return;
+        }
+
+        if (!saveRes.ok) {
+          statusEl.style.display = 'none';
+          errEl.textContent = "Couldn't save the key (status " + saveRes.status + ") — please try again.";
+          errEl.style.display = 'block';
+          saveBtn.disabled = keyInput.value.trim().length === 0;
+          return;
+        }
+
+        // Keep plaintext key in module memory only; route to the placeholder.
+        anthropicKey = key;
+        keyInput.value = '';
+        renderPlaceholder();
+      }
+
+      saveBtn.addEventListener('click', validateAndSave);
+      keyInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !saveBtn.disabled) validateAndSave();
+      });
+
+      show(onboardView);
     }
   </script>
 </body>

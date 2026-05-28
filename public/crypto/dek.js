@@ -51,3 +51,30 @@ export async function unwrapDEK(ciphertext_b64, iv_b64, kek) {
     ['encrypt', 'decrypt']
   );
 }
+
+// Same AES-256-GCM convention as wrapDEK/unwrapDEK, but for arbitrary UTF-8 text
+// (e.g. the user's Anthropic API key) encrypted under the DEK.
+export async function encryptStringWithDEK(plaintext, dek) {
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    dek,
+    new TextEncoder().encode(plaintext)
+  );
+  return {
+    ciphertext_b64: bytesToB64(new Uint8Array(ciphertext)),
+    iv_b64: bytesToB64(iv)
+  };
+}
+
+export async function decryptStringWithDEK(ciphertext_b64, iv_b64, dek) {
+  const ciphertext = b64ToBytes(ciphertext_b64);
+  const iv = b64ToBytes(iv_b64);
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv },
+    dek,
+    ciphertext
+  );
+  return new TextDecoder().decode(plaintext);
+}

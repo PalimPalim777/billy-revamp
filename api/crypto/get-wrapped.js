@@ -48,7 +48,7 @@ module.exports = async function handler(req, res) {
 
   const { data, error } = await supabase
     .from('users')
-    .select('salt, kdf_version, dek_wrapped_by_password, dek_wrapped_by_password_iv, dek_wrapped_by_recovery, dek_wrapped_by_recovery_iv')
+    .select('salt, kdf_version, dek_wrapped_by_password, dek_wrapped_by_password_iv, dek_wrapped_by_recovery, dek_wrapped_by_recovery_iv, anthropic_key_wrapped, anthropic_key_iv, onboarding_complete')
     .eq('id', userId)
     .single();
 
@@ -72,6 +72,9 @@ module.exports = async function handler(req, res) {
     dek_wrapped_by_password: data.dek_wrapped_by_password,
     dek_wrapped_by_password_iv: data.dek_wrapped_by_password_iv,
     dek_wrapped_by_recovery: data.dek_wrapped_by_recovery,
-    dek_wrapped_by_recovery_iv: data.dek_wrapped_by_recovery_iv
+    dek_wrapped_by_recovery_iv: data.dek_wrapped_by_recovery_iv,
+    anthropic_key_wrapped: data.anthropic_key_wrapped,
+    anthropic_key_iv: data.anthropic_key_iv,
+    onboarding_complete: data.onboarding_complete === true
   }));
 };
