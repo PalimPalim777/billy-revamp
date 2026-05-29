@@ -107,7 +107,17 @@
 
       <div id="st-memo" class="cap-state">
         <div id="memoCard" class="memo-card"></div>
-        <div><button id="discardBtn">Discard &amp; new capture</button></div>
+        <p id="saveErr" class="err" style="display:none"></p>
+        <div class="row">
+          <button id="saveMemoBtn">Save memo</button>
+          <button id="discardBtn">Discard &amp; new capture</button>
+        </div>
+      </div>
+
+      <div id="st-saved" class="cap-state">
+        <div id="savedCard" class="memo-card"></div>
+        <p class="connected">Saved ✓</p>
+        <div><button id="captureAgainBtn">Capture again</button></div>
       </div>
 
       <div id="st-error" class="cap-state">
@@ -124,6 +134,7 @@
     import { BILLY_MODEL, callLLM } from './lib/llm.js';
     import { setAnthropicKey, getAnthropicKey, clearAnthropicKey } from './lib/session.js';
     import { loadCapturePromptV1 } from './lib/prompts-loader.js';
+    import { saveMemo } from './lib/memos.js';
 
     const loading = document.getElementById('loading');
     const onboardView = document.getElementById('onboardView');
@@ -142,6 +153,7 @@
       capturing: document.getElementById('st-capturing'),
       synthesizing: document.getElementById('st-synthesizing'),
       memo: document.getElementById('st-memo'),
+      saved: document.getElementById('st-saved'),
       error: document.getElementById('st-error')
     };
     const connectedLine = document.getElementById('connectedLine');
@@ -150,6 +162,9 @@
     const sendBtn = document.getElementById('sendBtn');
     const endBtn = document.getElementById('endBtn');
     const memoCardEl = document.getElementById('memoCard');
+    const savedCardEl = document.getElementById('savedCard');
+    const saveMemoBtn = document.getElementById('saveMemoBtn');
+    const saveErr = document.getElementById('saveErr');
     const errorMsgEl = document.getElementById('errorMsg');
     const retryBtn = document.getElementById('retryBtn');
 
@@ -157,6 +172,7 @@
     let companionPrompt = null;
     let synthesisPrompt = null;
     let pendingRetry = null;
+    let captureContext = null;
 
     function setCaptureState(s) {
       for (const k in capStates) capStates[k].classList.remove('active');
@@ -165,6 +181,7 @@
 
     function enterEntry() {
       history = [];
+      captureContext = null;
       connectedLine.style.display = getAnthropicKey() ? 'block' : 'none';
       setCaptureState('entry');
       show(captureView);
@@ -278,14 +295,19 @@
           enterError(new Error('SYNTH_PARSE'), doSynthesize);
           return;
         }
-        renderMemo(memo);
+        captureContext = { memo, promptVersion: 'lifeos-capture-v1' };
+        saveErr.style.display = 'none';
+        saveMemoBtn.disabled = false;
+        saveMemoBtn.textContent = 'Save memo';
+        renderMemo(memo, memoCardEl);
         setCaptureState('memo');
       } catch (err) {
         enterError(err, doSynthesize);
       }
     }
 
-    function renderMemo(memo) {
+    function renderMemo(memo, target) {
+      const memoCardEl = target;
       memoCardEl.innerHTML = '';
 
       const h3 = document.createElement('h3');
@@ -326,8 +348,53 @@
       }
     }
 
+    function showSaveError(err) {
+      const code = (err && err.message) ? err.message : '';
+      let msg;
+      if (code === 'MEMO_NO_DEK' || code === 'MEMO_AUTH') {
+        msg = 'Your session expired. Please re-unlock.';
+      } else if (code.startsWith('MEMO_BAD_INPUT_')) {
+        msg = `Memo failed validation (${code.slice(15)}). Report if it persists.`;
+      } else if (code === 'MEMO_ID_CONFLICT') {
+        msg = 'Save failed twice with ID conflict — try again.';
+      } else if (code.startsWith('MEMO_HTTP_')) {
+        msg = `Save failed (HTTP ${code.slice(10)}). Try again.`;
+      } else {
+        msg = 'Save failed — check your connection and try again.';
+      }
+      saveErr.textContent = msg;
+      saveErr.style.display = 'block';
+    }
+
+    async function doSaveMemo() {
+      if (!captureContext || saveMemoBtn.disabled) return;
+      saveErr.style.display = 'none';
+      saveMemoBtn.disabled = true;
+      saveMemoBtn.textContent = 'Saving…';
+      try {
+        try {
+          await saveMemo(captureContext.memo, captureContext.promptVersion);
+        } catch (err) {
+          // Transparent single retry with a fresh UUID (saveMemo mints a new one each call).
+          if (err && err.message === 'MEMO_ID_CONFLICT') {
+            await saveMemo(captureContext.memo, captureContext.promptVersion);
+          } else {
+            throw err;
+          }
+        }
+        renderMemo(captureContext.memo, savedCardEl);
+        setCaptureState('saved');
+      } catch (err) {
+        saveMemoBtn.disabled = false;
+        saveMemoBtn.textContent = 'Save memo';
+        showSaveError(err);
+      }
+    }
+
     // Capture listeners (wired once; elements always present in the DOM).
     document.getElementById('startBtn').addEventListener('click', startCapture);
+    saveMemoBtn.addEventListener('click', doSaveMemo);
+    document.getElementById('captureAgainBtn').addEventListener('click', enterEntry);
     sendBtn.addEventListener('click', doSend);
     endBtn.addEventListener('click', () => { if (!endBtn.disabled) doSynthesize(); });
     captureInput.addEventListener('keydown', (e) => {
