@@ -32,3 +32,32 @@ export async function saveMemo(memo, promptVersion) {
   const out = await r.json();
   return { id: out.id, created_at: out.created_at };
 }
+
+export async function saveEmbedding(memoId, embeddingFloat32, modelVersion) {
+  const dek = await getSessionDEK();
+  if (!dek) throw new Error('EMBED_NO_DEK');
+
+  const { float32ArrayToBase64 } = await import('./embeddings.js');
+  const plaintext_b64 = float32ArrayToBase64(embeddingFloat32);
+  // encryptStringWithDEK takes a UTF-8 string; a base64 string is valid UTF-8.
+  const { ciphertext_b64, iv_b64 } = await encryptStringWithDEK(plaintext_b64, dek);
+
+  const r = await fetch(`/api/memos/${memoId}/embedding`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({
+      embedding_ciphertext: ciphertext_b64,
+      embedding_iv: iv_b64,
+      embedding_model_version: modelVersion
+    })
+  });
+
+  if (r.status === 401) throw new Error('EMBED_AUTH');
+  if (r.status === 404) throw new Error('EMBED_NOT_FOUND');
+  if (r.status === 400) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(`EMBED_BAD_INPUT_${j.detail || 'unknown'}`);
+  }
+  if (!r.ok) throw new Error(`EMBED_HTTP_${r.status}`);
+}

@@ -117,6 +117,7 @@
       <div id="st-saved" class="cap-state">
         <div id="savedCard" class="memo-card"></div>
         <p class="connected">Saved ✓</p>
+        <p id="embedStatus" class="small" style="display:none"></p>
         <div><button id="captureAgainBtn">Capture again</button></div>
       </div>
 
@@ -134,7 +135,8 @@
     import { BILLY_MODEL, callLLM } from './lib/llm.js';
     import { setAnthropicKey, getAnthropicKey, clearAnthropicKey } from './lib/session.js';
     import { loadCapturePromptV1 } from './lib/prompts-loader.js';
-    import { saveMemo } from './lib/memos.js';
+    import { saveMemo, saveEmbedding } from './lib/memos.js';
+    import { startLoadingEmbeddingModel, isEmbeddingModelReady, embedMemo, EMBEDDING_MODEL_VERSION } from './lib/embeddings.js';
 
     const loading = document.getElementById('loading');
     const onboardView = document.getElementById('onboardView');
@@ -163,6 +165,7 @@
     const endBtn = document.getElementById('endBtn');
     const memoCardEl = document.getElementById('memoCard');
     const savedCardEl = document.getElementById('savedCard');
+    const embedStatusEl = document.getElementById('embedStatus');
     const saveMemoBtn = document.getElementById('saveMemoBtn');
     const saveErr = document.getElementById('saveErr');
     const errorMsgEl = document.getElementById('errorMsg');
@@ -239,6 +242,9 @@
     }
 
     async function startCapture() {
+      // Begin loading the embedding model in parallel with the conversation.
+      // Fire-and-forget: a load failure must not break capture (embedding is a follow-up).
+      startLoadingEmbeddingModel().catch(err => console.warn('[embeddings] background load failed:', err));
       try {
         const p = await loadCapturePromptV1();
         companionPrompt = p.companion;
@@ -348,6 +354,32 @@
       }
     }
 
+    function showEmbeddingStatus(state) {
+      const map = {
+        embedding: { text: 'Embedding…', color: '#888' },
+        embedded: { text: 'Embedded ✓', color: '#1a7f37' },
+        pending: { text: 'Embedding pending — will retry', color: '#b8860b' }
+      };
+      const s = map[state];
+      if (!s) { embedStatusEl.style.display = 'none'; return; }
+      embedStatusEl.textContent = s.text;
+      embedStatusEl.style.color = s.color;
+      embedStatusEl.style.display = 'block';
+    }
+
+    async function embedAndSave(memoId, memo) {
+      showEmbeddingStatus('embedding');
+      try {
+        const vec = await embedMemo(memo);
+        await saveEmbedding(memoId, vec, EMBEDDING_MODEL_VERSION);
+        showEmbeddingStatus('embedded');
+      } catch (err) {
+        console.warn('[embeddings] generate or save failed:', err);
+        showEmbeddingStatus('pending');
+        // No auto-retry in this milestone. A later milestone owns retry.
+      }
+    }
+
     function showSaveError(err) {
       const code = (err && err.message) ? err.message : '';
       let msg;
@@ -372,18 +404,22 @@
       saveMemoBtn.disabled = true;
       saveMemoBtn.textContent = 'Saving…';
       try {
+        let saved;
         try {
-          await saveMemo(captureContext.memo, captureContext.promptVersion);
+          saved = await saveMemo(captureContext.memo, captureContext.promptVersion);
         } catch (err) {
           // Transparent single retry with a fresh UUID (saveMemo mints a new one each call).
           if (err && err.message === 'MEMO_ID_CONFLICT') {
-            await saveMemo(captureContext.memo, captureContext.promptVersion);
+            saved = await saveMemo(captureContext.memo, captureContext.promptVersion);
           } else {
             throw err;
           }
         }
         renderMemo(captureContext.memo, savedCardEl);
+        showEmbeddingStatus(null);
         setCaptureState('saved');
+        // Embedding runs AFTER the visible "Saved ✓" so it never blocks perceived save.
+        embedAndSave(saved.id, captureContext.memo);
       } catch (err) {
         saveMemoBtn.disabled = false;
         saveMemoBtn.textContent = 'Save memo';
