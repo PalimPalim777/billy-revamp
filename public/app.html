@@ -118,6 +118,7 @@
         <div id="savedCard" class="memo-card"></div>
         <p class="connected">Saved ✓</p>
         <p id="embedStatus" class="small" style="display:none"></p>
+        <p id="blobStatus" class="small" style="display:none"></p>
         <div><button id="captureAgainBtn">Capture again</button></div>
       </div>
 
@@ -135,8 +136,16 @@
     import { BILLY_MODEL, callLLM } from './lib/llm.js';
     import { setAnthropicKey, getAnthropicKey, clearAnthropicKey } from './lib/session.js';
     import { loadCapturePromptV1 } from './lib/prompts-loader.js';
-    import { saveMemo, saveEmbedding } from './lib/memos.js';
-    import { startLoadingEmbeddingModel, isEmbeddingModelReady, embedMemo, EMBEDDING_MODEL_VERSION } from './lib/embeddings.js';
+    import { saveMemo, saveEmbedding, fetchOtherEmbeddings, saveConnectionBlob } from './lib/memos.js';
+    import {
+      startLoadingEmbeddingModel,
+      isEmbeddingModelReady,
+      embedMemo,
+      base64ToFloat32Array,
+      topKNeighbors,
+      SCORING_FN_VERSION,
+      EMBEDDING_MODEL_VERSION
+    } from './lib/embeddings.js';
 
     const loading = document.getElementById('loading');
     const onboardView = document.getElementById('onboardView');
@@ -166,6 +175,7 @@
     const memoCardEl = document.getElementById('memoCard');
     const savedCardEl = document.getElementById('savedCard');
     const embedStatusEl = document.getElementById('embedStatus');
+    const blobStatusEl = document.getElementById('blobStatus');
     const saveMemoBtn = document.getElementById('saveMemoBtn');
     const saveErr = document.getElementById('saveErr');
     const errorMsgEl = document.getElementById('errorMsg');
@@ -367,16 +377,69 @@
       embedStatusEl.style.display = 'block';
     }
 
-    async function embedAndSave(memoId, memo) {
+    function showBlobStatus(state, n) {
+      let text, color;
+      if (state === 'connecting') { text = 'Connecting…'; color = '#888'; }
+      else if (state === 'connected') {
+        text = (n && n > 0) ? `Connected to ${n} neighbor(s) ✓` : 'Connected (first memo) ✓';
+        color = '#1a7f37';
+      } else if (state === 'pending') { text = 'Connection pending — will retry'; color = '#b8860b'; }
+      else { blobStatusEl.style.display = 'none'; return; }
+      blobStatusEl.textContent = text;
+      blobStatusEl.style.color = color;
+      blobStatusEl.style.display = 'block';
+    }
+
+    async function embedAndConnectAndSave(memoId, memo) {
       showEmbeddingStatus('embedding');
+      let vec;
       try {
-        const vec = await embedMemo(memo);
+        vec = await embedMemo(memo);
         await saveEmbedding(memoId, vec, EMBEDDING_MODEL_VERSION);
         showEmbeddingStatus('embedded');
       } catch (err) {
-        console.warn('[embeddings] generate or save failed:', err);
+        console.warn('[embeddings] failed:', err);
         showEmbeddingStatus('pending');
-        // No auto-retry in this milestone. A later milestone owns retry.
+        return; // No point computing the blob without an embedding for the new memo.
+      }
+
+      // Now compute the connection blob.
+      showBlobStatus('connecting');
+      try {
+        const others = await fetchOtherEmbeddings(memoId);
+
+        if (others.length === 0) {
+          // First memo for this user; empty neighbors array is correct.
+          const blob = { neighbors: [], scoring_fn_version: SCORING_FN_VERSION };
+          await saveConnectionBlob(memoId, blob, SCORING_FN_VERSION);
+          showBlobStatus('connected', 0);
+          return;
+        }
+
+        // Decrypt each other memo's embedding. If any decrypt fails, skip that one
+        // (it's a corrupted row, not a fatal error for this memo).
+        const dek = await getSessionDEK();
+        if (!dek) { showBlobStatus('pending'); return; }
+
+        const neighbors = [];
+        for (const m of others) {
+          try {
+            const plaintext_b64 = await decryptStringWithDEK(m.embedding_ciphertext, m.embedding_iv, dek);
+            const otherVec = base64ToFloat32Array(plaintext_b64);
+            neighbors.push({ id: m.id, vec: otherVec });
+          } catch (decryptErr) {
+            console.warn('[blob] decrypt failed for memo', m.id, decryptErr);
+            // Skip this one. The blob remains valid with fewer neighbors.
+          }
+        }
+
+        const top = topKNeighbors(vec, neighbors);
+        const blob = { neighbors: top, scoring_fn_version: SCORING_FN_VERSION };
+        await saveConnectionBlob(memoId, blob, SCORING_FN_VERSION);
+        showBlobStatus('connected', top.length);
+      } catch (err) {
+        console.warn('[blob] failed:', err);
+        showBlobStatus('pending');
       }
     }
 
@@ -417,9 +480,10 @@
         }
         renderMemo(captureContext.memo, savedCardEl);
         showEmbeddingStatus(null);
+        showBlobStatus(null);
         setCaptureState('saved');
-        // Embedding runs AFTER the visible "Saved ✓" so it never blocks perceived save.
-        embedAndSave(saved.id, captureContext.memo);
+        // Embedding + connection-blob run AFTER the visible "Saved ✓" so they never block perceived save.
+        embedAndConnectAndSave(saved.id, captureContext.memo);
       } catch (err) {
         saveMemoBtn.disabled = false;
         saveMemoBtn.textContent = 'Save memo';

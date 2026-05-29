@@ -61,3 +61,41 @@ export async function saveEmbedding(memoId, embeddingFloat32, modelVersion) {
   }
   if (!r.ok) throw new Error(`EMBED_HTTP_${r.status}`);
 }
+
+export async function fetchOtherEmbeddings(excludeMemoId) {
+  const r = await fetch(`/api/memos/embeddings?exclude=${encodeURIComponent(excludeMemoId)}`, {
+    method: 'GET',
+    credentials: 'same-origin'
+  });
+  if (r.status === 401) throw new Error('EMBED_FETCH_AUTH');
+  if (!r.ok) throw new Error(`EMBED_FETCH_HTTP_${r.status}`);
+  const out = await r.json();
+  return out.memos || [];
+}
+
+export async function saveConnectionBlob(memoId, blob, scoringFnVersion) {
+  const dek = await getSessionDEK();
+  if (!dek) throw new Error('BLOB_NO_DEK');
+
+  const plaintext = JSON.stringify(blob);
+  const { ciphertext_b64, iv_b64 } = await encryptStringWithDEK(plaintext, dek);
+
+  const r = await fetch(`/api/memos/${memoId}/connection-blob`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({
+      connection_blob_ciphertext: ciphertext_b64,
+      connection_blob_iv: iv_b64,
+      scoring_fn_version: scoringFnVersion
+    })
+  });
+
+  if (r.status === 401) throw new Error('BLOB_AUTH');
+  if (r.status === 404) throw new Error('BLOB_NOT_FOUND');
+  if (r.status === 400) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(`BLOB_BAD_INPUT_${j.detail || 'unknown'}`);
+  }
+  if (!r.ok) throw new Error(`BLOB_HTTP_${r.status}`);
+}
