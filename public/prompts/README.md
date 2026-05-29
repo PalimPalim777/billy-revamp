@@ -2,6 +2,8 @@
 
 This directory holds the versioned LifeOS system prompts that shape Billy's brain-layer behavior. The LifeOS prompt is the most important artifact in the project (per `billy-revamp-multiuser.md` §1.2) — it is the interpretive lens Claude operates from on every capture and every retrieval.
 
+These files live under `public/prompts/` so Vercel serves them statically; the client fetches them at `/prompts/<file>` (e.g. `/prompts/lifeos-capture-v1.md`). The prompt is non-sensitive per the open-architecture philosophy.
+
 ## Versioning convention
 
 - Each prompt file is named `<role>-v<n>.md` (e.g. `lifeos-capture-v1.md`).
