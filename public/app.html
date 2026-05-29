@@ -18,31 +18,50 @@
       padding: 24px;
       -webkit-font-smoothing: antialiased;
     }
-    main { max-width: 480px; width: 100%; text-align: center; }
+    main { max-width: 560px; width: 100%; text-align: center; }
     h1 { font-size: 24px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.02em; }
+    h3 { font-size: 19px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.01em; }
     p { font-size: 16px; line-height: 1.5; color: #555; margin: 0 0 16px; }
     a { color: #111; font-size: 13px; }
-    input[type="text"], input[type="password"] {
+    input[type="text"], input[type="password"], textarea {
       width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ddd;
       border-radius: 8px; margin: 0 0 10px; background: #fff; color: #111;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
+    textarea { resize: vertical; min-height: 64px; text-align: left; }
     button {
       padding: 12px 20px; background: #111; color: #fff; border: 0; border-radius: 8px;
       font-size: 15px; font-weight: 500; cursor: pointer; font-family: inherit;
     }
     button:hover:not(:disabled) { background: #000; }
     button:disabled { background: #999; cursor: not-allowed; }
-    .row { display: flex; gap: 8px; align-items: center; justify-content: center; }
+    .row { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; }
     .toggle { background: transparent; color: #555; border: 1px solid #ddd; padding: 11px 12px; }
     .toggle:hover:not(:disabled) { background: #f0f0f0; }
-    .err { color: #b00020; font-size: 14px; margin: 8px 0 0; }
+    .err { color: #b00020; font-size: 14px; margin: 8px 0 12px; }
     .status { color: #888; font-size: 14px; margin: 8px 0 0; }
     .connected { color: #1a7f37; font-size: 14px; margin-top: 8px; }
     .view { display: none; }
     .view.active { display: block; }
+    .cap-state { display: none; }
+    .cap-state.active { display: block; }
     #loading { color: #888; font-size: 14px; }
     .small { font-size: 13px; margin-top: 18px; }
+    .messages {
+      text-align: left; max-height: 50vh; overflow-y: auto; border: 1px solid #eee;
+      border-radius: 10px; padding: 12px; background: #fff; margin: 0 0 12px;
+    }
+    .msg { margin: 0 0 12px; }
+    .msg:last-child { margin-bottom: 0; }
+    .who { font-size: 12px; font-weight: 600; color: #999; margin-bottom: 2px; }
+    .msg-body { font-size: 15px; line-height: 1.5; color: #222; white-space: pre-wrap; }
+    .msg-billy .msg-body { color: #111; }
+    .memo-card { text-align: left; border: 1px solid #e2e2e2; border-radius: 12px; padding: 18px; background: #fff; margin: 0 0 14px; }
+    .bucket { display: inline-block; font-size: 12px; font-weight: 600; color: #444; border: 1px solid #ccc; border-radius: 999px; padding: 2px 10px; margin: 0 0 12px; }
+    .memo-body { font-size: 15px; line-height: 1.55; color: #222; white-space: pre-wrap; margin: 0 0 12px; }
+    .memo-summary { font-size: 13px; font-style: italic; color: #777; margin: 0 0 8px; }
+    .memo-tags { font-size: 13px; color: #555; margin: 0 0 8px; }
+    .memo-time { font-size: 12px; color: #888; }
   </style>
 </head>
 <body>
@@ -63,44 +82,270 @@
       <p id="onboardErr" class="err" style="display:none"></p>
     </section>
 
-    <section id="placeholderView" class="view">
-      <h1>Billy — you're set up.</h1>
-      <p>Capture is coming next.</p>
-      <p id="connectedLine" class="connected" style="display:none">Anthropic key connected ✓</p>
-      <p class="small"><a id="signout" href="/api/auth/logout">Sign out</a></p>
+    <section id="captureView" class="view">
+      <div id="st-entry" class="cap-state">
+        <h1>Billy — you're set up.</h1>
+        <p id="connectedLine" class="connected" style="display:none">Anthropic key connected ✓</p>
+        <div><button id="startBtn">Start capture</button></div>
+        <p class="small"><a id="signout" href="/api/auth/logout">Sign out</a></p>
+      </div>
+
+      <div id="st-capturing" class="cap-state">
+        <div id="messages" class="messages"></div>
+        <textarea id="captureInput" rows="3"
+          placeholder="Type your thought… (Enter to send, Shift+Enter for a newline)"></textarea>
+        <div class="row">
+          <button id="sendBtn">Send</button>
+          <button id="endBtn" disabled>End conversation &amp; synthesize</button>
+        </div>
+        <p class="small"><a id="cancelLink" href="#">Cancel</a></p>
+      </div>
+
+      <div id="st-synthesizing" class="cap-state">
+        <p>Synthesizing your memo…</p>
+      </div>
+
+      <div id="st-memo" class="cap-state">
+        <div id="memoCard" class="memo-card"></div>
+        <div><button id="discardBtn">Discard &amp; new capture</button></div>
+      </div>
+
+      <div id="st-error" class="cap-state">
+        <p id="errorMsg" class="err"></p>
+        <div><button id="retryBtn" style="display:none">Retry</button></div>
+        <p class="small"><a id="errBack" href="#">Back</a></p>
+      </div>
     </section>
   </main>
 
   <script type="module">
     import { getSessionDEK, clearSessionDEK } from '/crypto/session-dek.js';
     import { encryptStringWithDEK, decryptStringWithDEK } from '/crypto/dek.js';
-
-    // Billy's single canonical model for all LLM work (reused by callLLM in 2.3).
-    // Do not scatter model literals elsewhere.
-    const BILLY_MODEL = 'claude-sonnet-4-6';
-
-    // The decrypted plaintext Anthropic key lives ONLY here, in module memory.
-    // Never written to sessionStorage; re-derived from DEK + wrapped key each load.
-    let anthropicKey = null;
+    import { BILLY_MODEL, callLLM } from './lib/llm.js';
+    import { setAnthropicKey, getAnthropicKey, clearAnthropicKey } from './lib/session.js';
+    import { loadCapturePromptV1 } from './lib/prompts-loader.js';
 
     const loading = document.getElementById('loading');
     const onboardView = document.getElementById('onboardView');
-    const placeholderView = document.getElementById('placeholderView');
+    const captureView = document.getElementById('captureView');
 
     function show(view) {
       loading.style.display = 'none';
       onboardView.classList.remove('active');
-      placeholderView.classList.remove('active');
+      captureView.classList.remove('active');
       view.classList.add('active');
     }
 
+    // ----- Capture flow -----
+    const capStates = {
+      entry: document.getElementById('st-entry'),
+      capturing: document.getElementById('st-capturing'),
+      synthesizing: document.getElementById('st-synthesizing'),
+      memo: document.getElementById('st-memo'),
+      error: document.getElementById('st-error')
+    };
+    const connectedLine = document.getElementById('connectedLine');
+    const messagesEl = document.getElementById('messages');
+    const captureInput = document.getElementById('captureInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const endBtn = document.getElementById('endBtn');
+    const memoCardEl = document.getElementById('memoCard');
+    const errorMsgEl = document.getElementById('errorMsg');
+    const retryBtn = document.getElementById('retryBtn');
+
+    let history = [];
+    let companionPrompt = null;
+    let synthesisPrompt = null;
+    let pendingRetry = null;
+
+    function setCaptureState(s) {
+      for (const k in capStates) capStates[k].classList.remove('active');
+      capStates[s].classList.add('active');
+    }
+
+    function enterEntry() {
+      history = [];
+      connectedLine.style.display = getAnthropicKey() ? 'block' : 'none';
+      setCaptureState('entry');
+      show(captureView);
+    }
+
+    function renderMessages() {
+      messagesEl.innerHTML = '';
+      for (const m of history) {
+        const wrap = document.createElement('div');
+        wrap.className = 'msg ' + (m.role === 'user' ? 'msg-user' : 'msg-billy');
+        const who = document.createElement('div');
+        who.className = 'who';
+        who.textContent = m.role === 'user' ? 'You' : 'Billy';
+        const body = document.createElement('div');
+        body.className = 'msg-body';
+        body.textContent = m.content; // textContent: never interpret model/user text as HTML
+        wrap.appendChild(who);
+        wrap.appendChild(body);
+        messagesEl.appendChild(wrap);
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function setControls(busy) {
+      const hasUser = history.some(m => m.role === 'user');
+      captureInput.disabled = busy;
+      sendBtn.disabled = busy;
+      endBtn.disabled = busy || !hasUser;
+    }
+
+    function errorInfo(code) {
+      if (code === 'LLM_NO_KEY') return { msg: "Your Anthropic key isn't available — please sign out and back in.", retry: false };
+      if (code === 'LLM_AUTH') return { msg: "Your Anthropic key was rejected. It may have been revoked or rotated.", retry: false };
+      if (code === 'LLM_RATELIMIT') return { msg: "Rate-limited by Anthropic. Wait a moment and try again.", retry: true };
+      if (code.startsWith('LLM_HTTP_')) return { msg: `Request failed (HTTP ${code.slice(9)}). Try again.`, retry: true };
+      if (code.startsWith('PROMPT_FETCH_')) return { msg: `Couldn't load the capture prompt (HTTP ${code.slice(13)}). Refresh the page.`, retry: false };
+      if (code === 'PROMPT_PARSE') return { msg: "Capture prompt file is malformed. Refresh; report if it persists.", retry: false };
+      if (code === 'SYNTH_PARSE') return { msg: "Couldn't parse the synthesized memo. Try ending the conversation again.", retry: true };
+      // Uncaught fetch rejection (network failure) surfaces here as a TypeError.
+      return { msg: "Couldn't reach Anthropic — check your connection and try again.", retry: true };
+    }
+
+    function enterError(err, retryAction) {
+      const code = (err && err.message) ? err.message : '';
+      const info = errorInfo(code);
+      errorMsgEl.textContent = info.msg;
+      if (info.retry && retryAction) {
+        pendingRetry = retryAction;
+        retryBtn.style.display = 'inline-block';
+      } else {
+        pendingRetry = null;
+        retryBtn.style.display = 'none';
+      }
+      setCaptureState('error');
+    }
+
+    async function startCapture() {
+      try {
+        const p = await loadCapturePromptV1();
+        companionPrompt = p.companion;
+        synthesisPrompt = p.synthesis;
+      } catch (err) {
+        enterError(err, null);
+        return;
+      }
+      history = [];
+      renderMessages();
+      setCaptureState('capturing');
+      setControls(false);
+      captureInput.focus();
+    }
+
+    async function requestAssistantReply() {
+      setCaptureState('capturing');
+      renderMessages();
+      setControls(true);
+      try {
+        const billyText = await callLLM({ messages: history, system: companionPrompt });
+        history.push({ role: 'assistant', content: billyText });
+        renderMessages();
+        setControls(false);
+        captureInput.focus();
+      } catch (err) {
+        enterError(err, requestAssistantReply);
+      }
+    }
+
+    function doSend() {
+      if (captureInput.disabled) return;
+      const text = captureInput.value.trim();
+      if (!text) return;
+      history.push({ role: 'user', content: text });
+      captureInput.value = '';
+      renderMessages();
+      requestAssistantReply();
+    }
+
+    async function doSynthesize() {
+      setCaptureState('synthesizing');
+      try {
+        const transcript = history.map(m => `${m.role === 'user' ? 'User' : 'Billy'}: ${m.content}`).join('\n\n');
+        const synthMessages = [{
+          role: 'user',
+          content: `Conversation transcript:\n\n${transcript}\n\nExisting canonical tag vocabulary: []\n\nOutput the Memo as bare JSON, no preamble.`
+        }];
+        const out = await callLLM({ messages: synthMessages, system: synthesisPrompt, maxTokens: 4096 });
+        let memo;
+        try {
+          memo = JSON.parse(out);
+        } catch {
+          enterError(new Error('SYNTH_PARSE'), doSynthesize);
+          return;
+        }
+        renderMemo(memo);
+        setCaptureState('memo');
+      } catch (err) {
+        enterError(err, doSynthesize);
+      }
+    }
+
+    function renderMemo(memo) {
+      memoCardEl.innerHTML = '';
+
+      const h3 = document.createElement('h3');
+      h3.textContent = memo.title || '';
+      memoCardEl.appendChild(h3);
+
+      if (memo.para_bucket) {
+        const bucket = document.createElement('span');
+        bucket.className = 'bucket';
+        bucket.textContent = memo.para_bucket;
+        memoCardEl.appendChild(bucket);
+      }
+
+      const body = document.createElement('div');
+      body.className = 'memo-body';
+      body.textContent = memo.body || '';
+      memoCardEl.appendChild(body);
+
+      if (memo.summary) {
+        const summary = document.createElement('div');
+        summary.className = 'memo-summary';
+        summary.textContent = memo.summary;
+        memoCardEl.appendChild(summary);
+      }
+
+      if (Array.isArray(memo.tags) && memo.tags.length > 0) {
+        const tags = document.createElement('div');
+        tags.className = 'memo-tags';
+        tags.textContent = memo.tags.join(' · ');
+        memoCardEl.appendChild(tags);
+      }
+
+      if (memo.time_reference !== null && memo.time_reference !== undefined && memo.time_reference !== '') {
+        const time = document.createElement('div');
+        time.className = 'memo-time';
+        time.textContent = 'Time: ' + memo.time_reference;
+        memoCardEl.appendChild(time);
+      }
+    }
+
+    // Capture listeners (wired once; elements always present in the DOM).
+    document.getElementById('startBtn').addEventListener('click', startCapture);
+    sendBtn.addEventListener('click', doSend);
+    endBtn.addEventListener('click', () => { if (!endBtn.disabled) doSynthesize(); });
+    captureInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+    });
+    document.getElementById('cancelLink').addEventListener('click', (e) => { e.preventDefault(); enterEntry(); });
+    document.getElementById('discardBtn').addEventListener('click', enterEntry);
+    document.getElementById('errBack').addEventListener('click', (e) => { e.preventDefault(); enterEntry(); });
+    retryBtn.addEventListener('click', () => { if (pendingRetry) pendingRetry(); });
+
     document.getElementById('signout').addEventListener('click', (e) => {
       e.preventDefault();
-      anthropicKey = null;
+      clearAnthropicKey();
       clearSessionDEK();
       window.location.href = '/api/auth/logout';
     });
 
+    // ----- Load flow -----
     let dek = null;
     let wrapped = null;
 
@@ -118,23 +363,19 @@
       throw e;
     }
 
-    function renderPlaceholder() {
-      document.getElementById('connectedLine').style.display = anthropicKey ? 'block' : 'none';
-      show(placeholderView);
-    }
-
     // Already onboarded: decrypt the wrapped key into memory and skip the prompt.
     if (wrapped.onboarding_complete && wrapped.anthropic_key_wrapped && wrapped.anthropic_key_iv) {
       try {
-        anthropicKey = await decryptStringWithDEK(
+        const plain = await decryptStringWithDEK(
           wrapped.anthropic_key_wrapped,
           wrapped.anthropic_key_iv,
           dek
         );
-        renderPlaceholder();
+        setAnthropicKey(plain);
+        enterEntry();
       } catch {
         // Wrapped key present but undecryptable with this DEK — fall back to onboarding.
-        anthropicKey = null;
+        clearAnthropicKey();
         setupOnboarding();
       }
     } else {
@@ -167,7 +408,8 @@
         saveBtn.disabled = true;
 
         // Validate with a real, minimal call DIRECTLY from the browser to Anthropic.
-        // The plaintext key never touches our server — only this request carries it.
+        // This is a credentials check, not a brain-layer call — it stays a direct fetch,
+        // not routed through callLLM. The plaintext key never touches our server.
         let r;
         try {
           r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -238,10 +480,10 @@
           return;
         }
 
-        // Keep plaintext key in module memory only; route to the placeholder.
-        anthropicKey = key;
+        // Keep plaintext key in module memory only; route to the capture entry.
+        setAnthropicKey(key);
         keyInput.value = '';
-        renderPlaceholder();
+        enterEntry();
       }
 
       saveBtn.addEventListener('click', validateAndSave);
