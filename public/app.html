@@ -38,6 +38,7 @@
     .row { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; }
     .toggle { background: transparent; color: #555; border: 1px solid #ddd; padding: 11px 12px; }
     .toggle:hover:not(:disabled) { background: #f0f0f0; }
+    .toggle.active { background: #111; color: #fff; border-color: #111; }
     .err { color: #b00020; font-size: 14px; margin: 8px 0 12px; }
     .status { color: #888; font-size: 14px; margin: 8px 0 0; }
     .connected { color: #1a7f37; font-size: 14px; margin-top: 8px; }
@@ -45,6 +46,8 @@
     .view.active { display: block; }
     .cap-state { display: none; }
     .cap-state.active { display: block; }
+    .hidden { display: none; }
+    .mode-toggle { margin: 0 0 20px; }
     #loading { color: #888; font-size: 14px; }
     .small { font-size: 13px; margin-top: 18px; }
     .messages {
@@ -83,6 +86,19 @@
     </section>
 
     <section id="captureView" class="view">
+      <!-- Mode toggle (Capture | Retrieve). Lives inside #captureView, so it is
+           only ever visible in the onboarded+unlocked surface; the onboarding
+           key-paste view (#onboardView) never shows it. Capture is active on every
+           load of /app; last-used mode is intentionally not persisted in 3.1. -->
+      <div class="row mode-toggle" id="modeToggle">
+        <button id="modeCaptureBtn" class="toggle active" type="button" aria-pressed="true">Capture</button>
+        <button id="modeRetrieveBtn" class="toggle" type="button" aria-pressed="false">Retrieve</button>
+      </div>
+
+      <!-- Capture surface, wrapped only. Its markup, element IDs and event
+           bindings are unchanged; the wrapper just lets it be hidden/shown on a
+           mode switch without ever being destroyed or re-rendered. -->
+      <div id="capture-view">
       <div id="st-entry" class="cap-state">
         <h1>Billy — you're set up.</h1>
         <p id="connectedLine" class="connected" style="display:none">Anthropic key connected ✓</p>
@@ -127,6 +143,11 @@
         <div><button id="retryBtn" style="display:none">Retry</button></div>
         <p class="small"><a id="errBack" href="#">Back</a></p>
       </div>
+      </div>
+
+      <!-- Retrieve surface. Hidden by default (Capture is the default mode).
+           Mounted lazily on first switch to Retrieve via dynamic import. -->
+      <div id="retrieve-view" class="hidden"></div>
     </section>
   </main>
 
@@ -511,6 +532,51 @@
       clearSessionDEK();
       window.location.href = '/api/auth/logout';
     });
+
+    // ----- Mode toggle (Capture | Retrieve) -----
+    // Switching only hides/shows the two wrappers — it never destroys or
+    // re-renders the capture DOM, so capture state survives a round-trip.
+    // Retrieve is mounted lazily on first selection; nothing here touches the
+    // key, the DEK, the embedding model, the LLM, or the network.
+    const modeCaptureBtn = document.getElementById('modeCaptureBtn');
+    const modeRetrieveBtn = document.getElementById('modeRetrieveBtn');
+    const captureModeView = document.getElementById('capture-view');
+    const retrieveModeView = document.getElementById('retrieve-view');
+    let retrieveMounted = false;
+
+    function showCaptureMode() {
+      retrieveModeView.classList.add('hidden');
+      captureModeView.classList.remove('hidden');
+      modeRetrieveBtn.classList.remove('active');
+      modeRetrieveBtn.setAttribute('aria-pressed', 'false');
+      modeCaptureBtn.classList.add('active');
+      modeCaptureBtn.setAttribute('aria-pressed', 'true');
+    }
+
+    async function showRetrieveMode() {
+      modeCaptureBtn.classList.remove('active');
+      modeCaptureBtn.setAttribute('aria-pressed', 'false');
+      modeRetrieveBtn.classList.add('active');
+      modeRetrieveBtn.setAttribute('aria-pressed', 'true');
+      captureModeView.classList.add('hidden');
+      retrieveModeView.classList.remove('hidden');
+      if (retrieveMounted) return;          // already imported + mounted: just show it
+      retrieveMounted = true;               // set before await so a rapid 2nd click can't double-mount
+      try {
+        const mod = await import('/lib/retrieve/retrieve-ui.js');
+        mod.mountRetrieve(retrieveModeView);
+      } catch (err) {
+        retrieveMounted = false;            // allow a retry on a later switch
+        retrieveModeView.innerHTML = '';    // never leave the panel blank
+        const p = document.createElement('p');
+        p.className = 'err';
+        p.textContent = "Couldn't load Retrieve. Refresh and try again.";
+        retrieveModeView.appendChild(p);
+      }
+    }
+
+    modeCaptureBtn.addEventListener('click', showCaptureMode);
+    modeRetrieveBtn.addEventListener('click', showRetrieveMode);
 
     // ----- Load flow -----
     let dek = null;
