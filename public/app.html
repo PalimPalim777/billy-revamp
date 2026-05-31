@@ -98,7 +98,7 @@
       <!-- Capture surface, wrapped only. Its markup, element IDs and event
            bindings are unchanged; the wrapper just lets it be hidden/shown on a
            mode switch without ever being destroyed or re-rendered. -->
-      <div id="capture-view">
+      <div id="capture-mode">
       <div id="st-entry" class="cap-state">
         <h1>Billy — you're set up.</h1>
         <p id="connectedLine" class="connected" style="display:none">Anthropic key connected ✓</p>
@@ -147,7 +147,7 @@
 
       <!-- Retrieve surface. Hidden by default (Capture is the default mode).
            Mounted lazily on first switch to Retrieve via dynamic import. -->
-      <div id="retrieve-view" class="hidden"></div>
+      <div id="retrieve-mode" class="hidden"></div>
     </section>
   </main>
 
@@ -540,8 +540,8 @@
     // key, the DEK, the embedding model, the LLM, or the network.
     const modeCaptureBtn = document.getElementById('modeCaptureBtn');
     const modeRetrieveBtn = document.getElementById('modeRetrieveBtn');
-    const captureModeView = document.getElementById('capture-view');
-    const retrieveModeView = document.getElementById('retrieve-view');
+    const captureModeView = document.getElementById('capture-mode');
+    const retrieveModeView = document.getElementById('retrieve-mode');
     let retrieveMounted = false;
 
     function showCaptureMode() {
