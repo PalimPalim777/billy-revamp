@@ -24,7 +24,4 @@ When any of these three changes, audit the other two.
 ## Files
 
 - `lifeos-capture-v1.md` — capture-mode system prompt. Two sections (conversation companion + synthesis). Consumed by `callLLM` from milestone 2.3 onward.
-
-Future:
-
-- `lifeos-retrieve-v1.md` — retrieve-mode system prompt for the streaming summary call. Drafted alongside Phase 3 implementation.
+- `lifeos-retrieve-v1.md` — retrieve-mode system prompt for the streaming summary call (milestone 3.3). One section (center-only summary). Consumed by `callLLMStream` via `loadRetrievePromptV1`. Center-only by design; a neighbor-aware revision bumps to v2 at milestone 3.4.

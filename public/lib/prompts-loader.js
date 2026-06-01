@@ -11,3 +11,17 @@ export async function loadCapturePromptV1() {
   _cached = { companion: parts[1], synthesis: parts[2] };
   return _cached;
 }
+
+let _retrieveCached = null;
+
+export async function loadRetrievePromptV1() {
+  if (_retrieveCached) return _retrieveCached;
+  const r = await fetch('/prompts/lifeos-retrieve-v1.md');
+  if (!r.ok) throw new Error(`PROMPT_FETCH_${r.status}`);
+  const text = await r.text();
+  // File structure: [preamble] --- [Section A: summary system prompt] --- [Versioning]
+  const parts = text.split(/^---\s*$/m).map(s => s.trim());
+  if (parts.length < 2) throw new Error('PROMPT_PARSE');
+  _retrieveCached = { system: parts[1] };
+  return _retrieveCached;
+}
