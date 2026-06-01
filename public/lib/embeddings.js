@@ -24,21 +24,28 @@ export function isEmbeddingModelReady() {
   return _pipeline !== null;
 }
 
-export async function embedMemo(memo) {
+// Embed arbitrary text with the model's standard pooling (mean) + L2 normalization.
+// Single pipe() call site: a query embedding (retrieve) and a memo-body embedding
+// (capture) are therefore guaranteed to share the same model / pooling / normalization.
+export async function embedText(text) {
   const pipe = await startLoadingEmbeddingModel();
+  // bge models: mean pooling + normalization (cosine-ready).
+  const out = await pipe(text, { pooling: 'mean', normalize: true });
+  const vec = Array.from(out.data);
+  if (vec.length !== EMBEDDING_DIM) {
+    throw new Error(`EMBED_DIM_MISMATCH_${vec.length}`);
+  }
+  return new Float32Array(vec);
+}
+
+export async function embedMemo(memo) {
   // Per graph spec §4.1: embed body with tags appended for tag-aware similarity.
   // Tags appended as a trailing line, space-separated, # prefix preserved for the model.
   const tagsLine = (memo.tags && memo.tags.length)
     ? '\n\n' + memo.tags.map(t => `#${t}`).join(' ')
     : '';
   const input = (memo.body || '') + tagsLine;
-  // bge models: mean pooling + normalization (cosine-ready).
-  const out = await pipe(input, { pooling: 'mean', normalize: true });
-  const vec = Array.from(out.data);
-  if (vec.length !== EMBEDDING_DIM) {
-    throw new Error(`EMBED_DIM_MISMATCH_${vec.length}`);
-  }
-  return new Float32Array(vec);
+  return embedText(input);
 }
 
 // Serialize Float32Array → base64 for encryption-as-string.
