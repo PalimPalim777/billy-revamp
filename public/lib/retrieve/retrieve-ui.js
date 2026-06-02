@@ -493,7 +493,7 @@ function renderNeighborsReadout(bodyEl, totalCount, pickedCount, resolved, skipp
   const summary = document.createElement('p');
   summary.className = 'small';
   summary.style.margin = '0 0 6px';
-  let line = `blob: ${totalCount} neighbors · showing top ${resolved.length}`;
+  let line = `blob: ${totalCount} neighbors · showing top ${pickedCount}`;
   if (skipped > 0) line += ` · ${skipped} skipped (unfetchable)`;
   summary.textContent = line;
   bodyEl.appendChild(summary);
