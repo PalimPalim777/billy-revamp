@@ -58,7 +58,7 @@ function badInput(res, detail) {
 module.exports = async function handler(req, res) {
   res.setHeader('Content-Type', 'application/json');
 
-  if (req.method !== 'PUT') {
+  if (req.method !== 'GET' && req.method !== 'PUT') {
     res.statusCode = 405;
     res.end(JSON.stringify({ error: 'method_not_allowed' }));
     return;
@@ -74,6 +74,46 @@ module.exports = async function handler(req, res) {
 
   const id = getMemoId(req);
   if (!UUID_RE.test(id || '')) { badInput(res, 'id'); return; }
+
+  // GET /api/memos/<id>/connection-blob — read path (added for the retrieve neighbor
+  // layer, milestone 3.4a). Returns ONLY this owner's connection-blob ciphertext columns
+  // (plus the plaintext scoring_fn_version) so the client can decrypt the neighbor set
+  // locally with the session DEK. Never returns memo/embedding content or any
+  // plaintext-derived field. The content endpoint GET /api/memos/<id> is deliberately
+  // left untouched (it still returns only memo_ciphertext/_iv); this is its sibling.
+  if (req.method === 'GET') {
+    // Ownership enforced by BOTH .eq('id') AND .eq('user_id'); a guessed id belonging to
+    // another user returns the same 404 as a nonexistent id (no enumeration oracle).
+    const { data, error } = await supabase
+      .from('memos')
+      .select('connection_blob_ciphertext, connection_blob_iv, scoring_fn_version')
+      .eq('id', id)
+      .eq('user_id', payload.uid);
+
+    if (error) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'server' }));
+      return;
+    }
+
+    // Missing row, or a row owned by someone else: one indistinguishable 404 (matches
+    // GET /api/memos/<id>). A row that exists but has no blob yet returns 200 with null
+    // columns — an honest "memo exists, no neighbors" signal, distinct from not_found.
+    if (!data || data.length === 0) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'not_found' }));
+      return;
+    }
+
+    const row = data[0];
+    res.statusCode = 200;
+    res.end(JSON.stringify({
+      connection_blob_ciphertext: row.connection_blob_ciphertext,
+      connection_blob_iv: row.connection_blob_iv,
+      scoring_fn_version: row.scoring_fn_version
+    }));
+    return;
+  }
 
   let body;
   try {
