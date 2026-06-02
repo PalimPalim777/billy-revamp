@@ -1,12 +1,16 @@
-// Retrieve tab (milestone 3.2c) — typed-query full sweep + single-center selection.
+// Retrieve tab (milestone 3.3) — typed-query sweep + single-center selection (3.2c) PLUS
+// a streaming, CENTER-ONLY written summary rendered ABOVE the center card.
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
-// reimplemented here. No graph, no neighbors, no connection-blob read, no LLM/streaming.
-// The query text is embedded LOCALLY (transformers.js in the browser) and is NEVER
-// transmitted: the only network calls are GET /api/memos/embeddings (paginated sweep)
-// and GET /api/memos/<id> (center content) — neither carries the query.
+// reimplemented here. Still NO graph, NO neighbors, NO connection-blob read (those arrive
+// at 3.4): the summary is grounded in the CENTER memo alone.
+// The query is embedded LOCALLY and is never sent to our server. The streaming summary
+// calls api.anthropic.com directly with the user's own key, exactly as capture synthesis
+// does — the only plaintext leaving the browser is the prompt + center body, to Anthropic.
 import { startLoadingEmbeddingModel, embedText, base64ToFloat32Array, topKNeighbors } from '/lib/embeddings.js';
 import { getSessionDEK } from '/crypto/session-dek.js';
 import { decryptStringWithDEK } from '/crypto/dek.js';
+import { callLLMStream } from '/lib/llm.js';
+import { loadRetrievePromptV1 } from '/lib/prompts-loader.js';
 
 // Matches the server's EMBEDDINGS_PAGE_SIZE cap; pages the full corpus via ?limit=&cursor=.
 const SWEEP_PAGE_SIZE = 200;
@@ -77,8 +81,9 @@ export function mountRetrieve(container) {
     result.appendChild(p);
   }
 
-  function renderCenter(memo, score) {
-    result.innerHTML = '';
+  // Build the 3.2c center card as a detached element; the caller places it BELOW the
+  // streaming summary region. (Renders without the LLM, so it survives a summary failure.)
+  function buildCenterCard(memo, score) {
     const card = document.createElement('div');
     card.className = 'memo-card';
 
@@ -118,7 +123,7 @@ export function mountRetrieve(container) {
     scoreLine.textContent = `Best match · cosine ${score.toFixed(3)}`;
     card.appendChild(scoreLine);
 
-    result.appendChild(card);
+    return card;
   }
 
   async function submit() {
@@ -196,7 +201,16 @@ export function mountRetrieve(container) {
         return;
       }
 
-      renderCenter(memo, center.score);
+      // 3.2c center card + 3.3 streaming summary ABOVE it. The card renders immediately
+      // (it does not depend on the LLM); then the written summary streams into the region
+      // above it. streamSummary handles its own errors and never throws, so a summary
+      // failure leaves the correct center card in place.
+      result.innerHTML = '';
+      const { region: summaryRegion, textEl: summaryText } = buildSummaryRegion();
+      result.appendChild(summaryRegion);
+      result.appendChild(buildCenterCard(memo, center.score));
+
+      await streamSummary(q, memo, summaryText);
     } catch (err) {
       // Most likely the embedding model failed to load (CDN/network); never leave a blank panel.
       console.warn('[retrieve] sweep failed:', err);
@@ -211,4 +225,81 @@ export function mountRetrieve(container) {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
   });
   input.addEventListener('input', () => { hint.style.display = 'none'; });
+}
+
+// ---- 3.3 streaming summary helpers (CENTER-ONLY; no neighbor context) ----
+
+// A region for the streamed summary, placed ABOVE the center card. Returns the wrapper
+// plus the inner text element that the stream progressively writes into.
+function buildSummaryRegion() {
+  const region = document.createElement('div');
+  region.className = 'retrieve-summary';
+  region.style.margin = '0 0 16px';
+
+  const label = document.createElement('p');
+  label.className = 'small';
+  label.textContent = 'Summary';
+  label.style.margin = '0 0 4px';
+  region.appendChild(label);
+
+  const textEl = document.createElement('div');
+  textEl.className = 'retrieve-summary-text';
+  const waiting = document.createElement('span');
+  waiting.className = 'small';
+  waiting.textContent = 'Summarizing…';
+  textEl.appendChild(waiting);
+  region.appendChild(textEl);
+
+  return { region, textEl };
+}
+
+// Build the user turn: the query plus the CENTER memo's title/summary/body. No neighbors,
+// no surrounding memos — the summary is grounded in this one memo only.
+function buildRetrieveUserMessage(query, memo) {
+  const lines = [];
+  lines.push('User question:');
+  lines.push(query);
+  lines.push('');
+  lines.push("CENTER memo (the single best match from the user's own notes):");
+  if (memo.title) lines.push(`Title: ${memo.title}`);
+  if (memo.summary) lines.push(`Summary: ${memo.summary}`);
+  lines.push('Body:');
+  lines.push(memo.body || '');
+  return lines.join('\n');
+}
+
+// Stream a CENTER-ONLY written summary into textEl. Fully self-contained error handling:
+// any failure shows an inline message and NEVER throws, so the center card stays intact.
+async function streamSummary(query, memo, textEl) {
+  let acc = '';
+  let started = false;
+  try {
+    const { system } = await loadRetrievePromptV1();
+    const full = await callLLMStream({
+      system,
+      messages: [{ role: 'user', content: buildRetrieveUserMessage(query, memo) }],
+      onToken: (chunk) => {
+        if (!started) { textEl.textContent = ''; started = true; } // clear "Summarizing…"
+        acc += chunk;
+        textEl.textContent = acc;
+      }
+    });
+    const finalText = (full || acc || '').trim();
+    textEl.textContent = finalText || '(No summary was returned.)';
+  } catch (err) {
+    console.warn('[retrieve] summary stream failed:', err);
+    textEl.innerHTML = '';
+    const e = document.createElement('span');
+    e.className = 'err';
+    e.textContent = summaryErrorMessage(err);
+    textEl.appendChild(e);
+  }
+}
+
+function summaryErrorMessage(err) {
+  const code = (err && err.message) || '';
+  if (code === 'LLM_NO_KEY') return 'No Anthropic key in this session — re-unlock to generate a summary.';
+  if (code === 'LLM_AUTH') return 'Anthropic rejected the API key — the summary could not be generated.';
+  if (code === 'LLM_RATELIMIT') return 'Anthropic is rate-limiting right now — try again in a moment.';
+  return 'Could not generate a summary just now. Your best-match memo is shown below.';
 }
