@@ -1,9 +1,10 @@
-// Retrieve tab (milestone 3.3 + 3.4a neighbor data layer) — typed-query sweep +
-// single-center selection (3.2c), a CENTER-ONLY streaming written summary ABOVE the card
-// (3.3), and the 3.4a neighbor data layer BELOW the card: read+decrypt the center's
-// connection blob, N-fetch each shown neighbor's content, render a TEMPORARY plain-text
-// readout. The readout is throwaway — it is REMOVED at 3.4b when the SVG ego-graph
-// replaces it. Still NO graph/SVG/nodes/spokes/layout — that is 3.4b.
+// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph) — typed-query sweep +
+// single-center selection (3.2c), a CENTER-ONLY streaming written summary ABOVE (3.3), and
+// the 3.4b ego-graph BETWEEN the summary and the center card: the 3.4a data layer
+// (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
+// feeds a hand-rolled inline SVG — center node + a radial ring of score-sized neighbor
+// nodes + center↔neighbor spokes + hover-for-full-title labels. NO inter-neighbor edges
+// (3.5), NO click-to-recenter (3.6), NO double-click overlay (3.7), NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
 // streaming summary calls api.anthropic.com directly with the user's own key (capture
@@ -210,25 +211,25 @@ export function mountRetrieve(container) {
         return;
       }
 
-      // 3.2c center card + 3.3 streaming summary ABOVE it + 3.4a neighbor debug readout
-      // BELOW it. The card renders immediately (it does not depend on the LLM or the
-      // blob); then the written summary streams into the region above it and the neighbor
-      // layer fills the region below it. streamSummary AND loadAndRenderNeighbors each
-      // handle their own errors and NEVER throw, so a summary failure OR a neighbor-layer
-      // failure leaves the correct center card in place and the other region intact.
+      // 3.2c center card + 3.3 streaming summary ABOVE it + 3.4b ego-graph BETWEEN them.
+      // Final DOM order: summary → graph → center card. The card renders immediately (it
+      // depends on neither the LLM nor the blob); the summary streams into the region above
+      // and the ego-graph fills the region between. streamSummary AND loadAndRenderNeighbors
+      // each handle their own errors and NEVER throw, so a summary failure OR a graph/neighbor
+      // failure leaves the correct center card in place and the other regions intact.
       result.innerHTML = '';
       const { region: summaryRegion, textEl: summaryText } = buildSummaryRegion();
       result.appendChild(summaryRegion);
+      const { region: graphRegion, bodyEl: graphBody } = buildGraphRegion();
+      result.appendChild(graphRegion);
       result.appendChild(buildCenterCard(memo, center.score));
-      const { region: neighborsRegion, bodyEl: neighborsBody } = buildNeighborsDebugRegion();
-      result.appendChild(neighborsRegion);
 
       // Run the summary stream and the neighbor data layer in parallel. Both are
       // self-contained: each catches internally and resolves (never rejects), so
       // Promise.all reliably awaits both. setBusy(false) flips only once both finish.
       await Promise.all([
         streamSummary(q, memo, summaryText),
-        loadAndRenderNeighbors(center.memo_id, dek, neighborsBody)
+        loadAndRenderNeighbors(center.memo_id, memo, center.score, dek, graphBody)
       ]);
     } catch (err) {
       // Most likely the embedding model failed to load (CDN/network); never leave a blank panel.
@@ -323,65 +324,58 @@ function summaryErrorMessage(err) {
   return 'Could not generate a summary just now. Your best-match memo is shown below.';
 }
 
-// ---- 3.4a neighbor data layer (TEMPORARY debug readout — removed at 3.4b) ----
+// ---- 3.4a data layer + 3.4b ego-graph render ----
 //
 // Reads the center's connection blob, decrypts it with the session DEK, picks the top
 // neighbors by score, N-fetches each neighbor's content via the EXISTING /api/memos/<id>
-// endpoint, decrypts, and renders a plain-text block BELOW the center card so I can
-// eyeball-verify the round-trip before the SVG render lands at 3.4b.
+// endpoint, decrypts, and (3.4b) draws a hand-rolled inline SVG ego-graph BETWEEN the
+// summary and the center card. The DATA path is unchanged from 3.4a; only the render
+// target changed from a text readout to the SVG graph.
 //
-// Fully self-contained error handling: every failure mode lands in the debug region; the
+// Fully self-contained error handling: every failure mode lands in the graph region; the
 // 3.2c center card and the 3.3 streaming summary do NOT depend on this and must keep
 // rendering even if everything below fails.
 
-// Empty debug region with a placeholder line — appended to the result column immediately
-// so the DOM order (summary, card, neighbors) is fixed before either async path resolves.
-function buildNeighborsDebugRegion() {
+// Empty graph region with a placeholder line — appended to the result column immediately
+// so the DOM order (summary, graph, card) is fixed before either async path resolves.
+function buildGraphRegion() {
   const region = document.createElement('div');
-  region.className = 'retrieve-neighbors-debug';
-  // Inline styles, deliberately: this block is throwaway (removed at 3.4b) and doesn't
-  // earn a CSS rule. The dashed border + bold header visually scream "debug".
-  region.style.margin = '16px 0 0';
-  region.style.padding = '8px';
-  region.style.border = '1px dashed #888';
-  region.style.background = '#f7f7f7';
-
-  const label = document.createElement('p');
-  label.className = 'small';
-  label.style.margin = '0 0 6px';
-  label.style.fontWeight = 'bold';
-  label.textContent = 'NEIGHBORS (debug — removed at 3.4b)';
-  region.appendChild(label);
+  region.className = 'retrieve-graph';
+  region.style.margin = '0 0 14px';
 
   const bodyEl = document.createElement('div');
   const waiting = document.createElement('span');
   waiting.className = 'small';
-  waiting.textContent = 'Loading neighbors…';
+  waiting.textContent = 'Building graph…';
   bodyEl.appendChild(waiting);
   region.appendChild(bodyEl);
 
   return { region, bodyEl };
 }
 
-// Read the center's connection blob, fetch+decrypt the top-N neighbors, render the
-// readout. Never throws: any uncaught path lands in the catch and shows an inline error.
-async function loadAndRenderNeighbors(centerId, dek, bodyEl) {
+// Read the center's connection blob, fetch+decrypt the top-N neighbors, draw the graph.
+// Never throws: any uncaught path lands in the catch and shows an inline error.
+//   centerId    — the center memo's id (memo_id), used for the blob fetch.
+//   centerMemo  — the already-decrypted 3.2c center memo { title, body, summary, ... }.
+//   centerScore — the center's cosine score (for the center node's hover title).
+async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bodyEl) {
+  const center = { memo_id: centerId, title: (centerMemo && centerMemo.title) || '(untitled)', score: centerScore };
   try {
     // 1) GET the center's blob (ciphertext-only sibling of the content endpoint).
     const r = await fetch(`/api/memos/${encodeURIComponent(centerId)}/connection-blob`, {
       method: 'GET',
       credentials: 'same-origin'
     });
-    if (r.status === 401) { showNeighborsError(bodyEl, 'Session expired — re-unlock to load neighbors.'); return; }
-    if (r.status === 404) { showNeighborsError(bodyEl, 'Could not load the center memo blob (it may have just been deleted).'); return; }
-    if (!r.ok) { showNeighborsError(bodyEl, `Could not load neighbors (HTTP ${r.status}).`); return; }
+    if (r.status === 401) { showGraphError(bodyEl, 'Session expired — re-unlock to load neighbors.'); return; }
+    if (r.status === 404) { showGraphError(bodyEl, 'Could not load the center memo blob (it may have just been deleted).'); return; }
+    if (!r.ok) { showGraphError(bodyEl, `Could not load neighbors (HTTP ${r.status}).`); return; }
     const blobResponse = await r.json();
 
     // 2) Null blob fields = the memo exists but was never connected (e.g. the very first
-    // memo, or one whose connect pass never finished). Treat as "no neighbors" honestly,
-    // distinct from a fetch error — no crash, no fabrication.
+    // memo, or one whose connect pass never finished). Draw the center node ALONE — an
+    // honest "no connections yet" graph, distinct from a fetch error. No crash, no ring.
     if (blobResponse.connection_blob_ciphertext == null || blobResponse.connection_blob_iv == null) {
-      showNoNeighbors(bodyEl);
+      renderEgoGraph(bodyEl, center, []);
       return;
     }
 
@@ -399,14 +393,14 @@ async function loadAndRenderNeighbors(centerId, dek, bodyEl) {
       blob = JSON.parse(plaintext);
     } catch (err) {
       console.warn('[retrieve] neighbor blob decrypt/parse failed:', err);
-      showNeighborsError(bodyEl, 'Found the neighbor set but could not decrypt it.');
+      showGraphError(bodyEl, 'Found the neighbor set but could not decrypt it.');
       return;
     }
 
     const allNeighbors = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
     if (allNeighbors.length === 0) {
-      // The connect pass ran but produced an empty set (e.g. first memo). Honest signal.
-      showNoNeighbors(bodyEl);
+      // The connect pass ran but produced an empty set (e.g. first memo). Lone center node.
+      renderEgoGraph(bodyEl, center, []);
       return;
     }
 
@@ -457,74 +451,220 @@ async function loadAndRenderNeighbors(centerId, dek, bodyEl) {
       }
     }
 
-    renderNeighborsReadout(bodyEl, allNeighbors.length, top.length, resolved, skipped);
+    // Draw the ego-graph from the resolved set. If every picked neighbor was unfetchable
+    // (resolved empty but the blob had neighbors), renderEgoGraph falls back to the lone
+    // center node — honest, no crash, no empty ring.
+    renderEgoGraph(bodyEl, center, resolved);
   } catch (err) {
     // Unhandled network/runtime error before any per-neighbor work. Show an inline
     // error; the card + summary above are unaffected.
     console.warn('[retrieve] neighbor layer failed:', err);
-    showNeighborsError(bodyEl, 'Could not load neighbors (network or server error). The best-match memo is shown above.');
+    showGraphError(bodyEl, 'Could not load neighbors (network or server error). The best-match memo is shown above.');
   }
 }
 
-function showNeighborsError(bodyEl, text) {
+// Inline error in the graph region. Reuses the app's .err token (#b00020). The center
+// card + summary are siblings and are unaffected — a graph failure is isolated here.
+function showGraphError(bodyEl, text) {
   bodyEl.innerHTML = '';
+  const panel = makeGraphPanel();
   const p = document.createElement('p');
   p.className = 'err';
   p.style.margin = '0';
   p.textContent = text;
-  bodyEl.appendChild(p);
+  panel.appendChild(p);
+  bodyEl.appendChild(panel);
 }
 
-function showNoNeighbors(bodyEl) {
-  bodyEl.innerHTML = '';
-  const p = document.createElement('p');
-  p.className = 'small';
-  p.style.margin = '0';
-  p.textContent = 'no neighbors for this memo';
-  bodyEl.appendChild(p);
+// ---- 3.4b ego-graph SVG render ----
+//
+// Hand-rolled inline SVG (no library, no new dependency). Single radial ring: the center
+// node in the middle, the resolved neighbors evenly spaced on one circle around it, a
+// spoke from the center to each neighbor (center↔neighbor ONLY — no neighbor↔neighbor
+// edges; that is 3.5), neighbor radius scaled by cosine score (center stays largest), and
+// a truncated label per node with the full title in an SVG <title> for hover. Styling
+// inherits the app's existing design tokens (see makeGraphPanel / the scoped <style>).
+//
+// Colours/sizes are LOCAL constants so the whole graph is tunable in one place. All text
+// is set via textContent / SVG text nodes — never innerHTML — so a hostile memo title
+// can never inject markup.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+// viewBox geometry. The SVG scales to its container (width:100%, height:auto) so it never
+// overflows at narrow width; precise mobile density is 3.8.
+const GRAPH_VB_W = 680;
+const GRAPH_VB_H = 500;
+const GRAPH_CX = GRAPH_VB_W / 2;
+const GRAPH_CY = GRAPH_VB_H / 2;
+const GRAPH_RING_R = 158;        // center→neighbor distance
+const CENTER_NODE_R = 48;        // fixed; always the largest node
+const NEIGHBOR_R_MIN = 16;       // weakest-scoring neighbor
+const NEIGHBOR_R_MAX = 34;       // strongest-scoring neighbor (< CENTER_NODE_R)
+const LABEL_TRUNCATE_NEIGHBOR = 16;
+const LABEL_TRUNCATE_CENTER = 22;
+
+// Design-token palette (lifted from public/app.html so the graph reads as part of the app).
+const C_INK = '#111';            // center node fill / primary ink (brand dark, = button)
+const C_INK_BODY = '#222';       // label ink
+const C_MUTED = '#888';          // captions
+const C_NODE_FILL = '#fff';      // neighbor fill (card surface)
+const C_NODE_STROKE = '#111';    // neighbor stroke
+const C_SPOKE = '#dcdcdc';       // spokes (subtle, ~ the app's #ddd lines)
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag);
+  if (attrs) for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
+  return el;
 }
 
-// totalCount = neighbors in the blob; pickedCount = how many we tried to show (= min(N, total));
-// resolved = successfully fetched+decrypted subset; skipped = (pickedCount - resolved.length).
-function renderNeighborsReadout(bodyEl, totalCount, pickedCount, resolved, skipped) {
+// Truncate to a small char budget with an ellipsis. The FULL title always lives in the
+// node's <title> for hover, so truncation never hides information.
+function truncateLabel(s, n) {
+  s = (s || '').trim();
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1).trimEnd() + '…';
+}
+
+// Map a neighbor's score → radius. Normalize against THIS set's own min/max so size
+// differences are visible even when cosine scores cluster. Divide-by-zero-safe: if every
+// score is equal (or a single neighbor), every node gets the mid radius.
+function makeScoreToRadius(neighbors) {
+  const scores = neighbors.map(n => (typeof n.score === 'number' ? n.score : 0));
+  const lo = Math.min(...scores);
+  const hi = Math.max(...scores);
+  const span = hi - lo;
+  const mid = (NEIGHBOR_R_MIN + NEIGHBOR_R_MAX) / 2;
+  return (score) => {
+    if (!(span > 0)) return mid;                       // all-equal / single → mid
+    const t = Math.max(0, Math.min(1, (score - lo) / span)); // clamp to [0,1]
+    return NEIGHBOR_R_MIN + t * (NEIGHBOR_R_MAX - NEIGHBOR_R_MIN);
+  };
+}
+
+// A card-framed panel matching .memo-card so the graph sits in the same visual frame as
+// the rest of the retrieve column.
+function makeGraphPanel() {
+  const panel = document.createElement('div');
+  panel.className = 'memo-card';      // inherit the app's card frame (border/radius/bg/pad)
+  panel.style.textAlign = 'center';
+  return panel;
+}
+
+// Draw the ego-graph. center = { memo_id, title, score }; neighbors = resolved set
+// [{ memo_id, title, summary, score }]. An empty neighbors array → lone center node.
+function renderEgoGraph(bodyEl, center, neighbors) {
   bodyEl.innerHTML = '';
+  const panel = makeGraphPanel();
 
-  // Header line: e.g. "blob: 12 neighbors · showing top 8 · 1 skipped (unfetchable)"
-  const summary = document.createElement('p');
-  summary.className = 'small';
-  summary.style.margin = '0 0 6px';
-  let line = `blob: ${totalCount} neighbors · showing top ${pickedCount}`;
-  if (skipped > 0) line += ` · ${skipped} skipped (unfetchable)`;
-  summary.textContent = line;
-  bodyEl.appendChild(summary);
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${GRAPH_VB_W} ${GRAPH_VB_H}`,
+    width: '100%',
+    role: 'img',
+    'aria-label': 'Ego-graph of the best-match memo and its nearest neighbors',
+    preserveAspectRatio: 'xMidYMid meet'
+  });
+  svg.style.display = 'block';
+  svg.style.width = '100%';
+  svg.style.height = 'auto';
+  svg.style.maxWidth = `${GRAPH_VB_W}px`;
+  svg.style.margin = '0 auto';
+  svg.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif';
 
-  if (resolved.length === 0) {
-    const none = document.createElement('p');
-    none.className = 'small';
-    none.style.margin = '0';
-    none.textContent = '(no neighbors could be fetched — all were unreadable)';
-    bodyEl.appendChild(none);
-    return;
+  // Scoped hover styling: emphasize a node's stroke and bold its label on hover. Desktop
+  // hover only (mobile tap is 3.8). cursor:default — neighbors are NOT clickable-to-pivot.
+  const style = svgEl('style');
+  style.textContent = `
+    .ego-node { cursor: default; }
+    .ego-neighbor circle { transition: stroke-width .12s ease; }
+    .ego-neighbor:hover circle { stroke-width: 3; }
+    .ego-neighbor:hover .ego-label { font-weight: 600; fill: ${C_INK}; }
+    .ego-label { pointer-events: none; }
+  `;
+  svg.appendChild(style);
+
+  // ---- spokes first (drawn behind, so nodes sit on top) ----
+  const count = neighbors.length;
+  const positions = neighbors.map((n, i) => {
+    // Start at the top (−90°) and go clockwise, evenly spaced on one ring.
+    const angle = -Math.PI / 2 + (i / count) * 2 * Math.PI;
+    return {
+      n,
+      angle,
+      x: GRAPH_CX + GRAPH_RING_R * Math.cos(angle),
+      y: GRAPH_CY + GRAPH_RING_R * Math.sin(angle)
+    };
+  });
+
+  for (const p of positions) {
+    svg.appendChild(svgEl('line', {
+      x1: GRAPH_CX, y1: GRAPH_CY, x2: p.x, y2: p.y,
+      stroke: C_SPOKE, 'stroke-width': 1.5
+    }));
   }
 
-  // Plain ordered list: title · score · memo_id. textContent throughout so a malicious
-  // title can never inject HTML even in this debug surface.
-  const list = document.createElement('ol');
-  list.style.margin = '0';
-  list.style.paddingLeft = '20px';
-  for (const n of resolved) {
-    const li = document.createElement('li');
+  // ---- neighbor nodes (on top of spokes) ----
+  const scoreToRadius = count ? makeScoreToRadius(neighbors) : null;
+  for (const p of positions) {
+    const r = scoreToRadius(typeof p.n.score === 'number' ? p.n.score : 0);
 
-    const title = document.createElement('strong');
-    title.textContent = n.title;
-    li.appendChild(title);
+    const g = svgEl('g', { class: 'ego-node ego-neighbor' });
 
-    const rest = document.createElement('span');
-    rest.className = 'small';
-    rest.textContent = ` · score ${n.score.toFixed(3)} · ${n.memo_id}`;
-    li.appendChild(rest);
+    const circle = svgEl('circle', {
+      cx: p.x, cy: p.y, r: r,
+      fill: C_NODE_FILL, stroke: C_NODE_STROKE, 'stroke-width': 1.5
+    });
+    // Full title on hover (native SVG tooltip). textContent → no markup injection.
+    const tip = svgEl('title');
+    tip.textContent = `${p.n.title || '(untitled)'} · cosine ${Number(p.n.score || 0).toFixed(3)}`;
+    g.appendChild(tip);
+    g.appendChild(circle);
 
-    list.appendChild(li);
+    // Truncated label, pushed radially outward so it clears the node. Anchor by hemisphere
+    // (left half → end, right half → start, near-vertical → middle) to reduce overlap.
+    const ux = Math.cos(p.angle), uy = Math.sin(p.angle);
+    const lx = p.x + ux * (r + 9);
+    const ly = p.y + uy * (r + 9) + (uy >= 0 ? 10 : -2); // nudge below/above by hemisphere
+    let anchor = 'middle';
+    if (p.x - GRAPH_CX > 24) anchor = 'start';
+    else if (p.x - GRAPH_CX < -24) anchor = 'end';
+
+    const label = svgEl('text', {
+      x: lx, y: ly, 'text-anchor': anchor, 'font-size': 12, fill: C_INK_BODY, class: 'ego-label'
+    });
+    label.textContent = truncateLabel(p.n.title, LABEL_TRUNCATE_NEIGHBOR);
+    g.appendChild(label);
+
+    svg.appendChild(g);
   }
-  bodyEl.appendChild(list);
+
+  // ---- center node last (largest, on top) ----
+  const cg = svgEl('g', { class: 'ego-node ego-center' });
+  const cTip = svgEl('title');
+  cTip.textContent = `${center.title || '(untitled)'} · best match · cosine ${Number(center.score || 0).toFixed(3)}`;
+  cg.appendChild(cTip);
+  cg.appendChild(svgEl('circle', {
+    cx: GRAPH_CX, cy: GRAPH_CY, r: CENTER_NODE_R,
+    fill: C_INK, stroke: C_INK, 'stroke-width': 1.5
+  }));
+  const cLabel = svgEl('text', {
+    x: GRAPH_CX, y: GRAPH_CY + 4, 'text-anchor': 'middle',
+    'font-size': 12, 'font-weight': 600, fill: '#fff', class: 'ego-label'
+  });
+  cLabel.textContent = truncateLabel(center.title, LABEL_TRUNCATE_CENTER / 2); // fits inside node
+  cg.appendChild(cLabel);
+  svg.appendChild(cg);
+
+  panel.appendChild(svg);
+
+  // Honest caption for the no-neighbors case: a lone center with no ring.
+  if (count === 0) {
+    const note = document.createElement('p');
+    note.className = 'small';
+    note.style.margin = '6px 0 0';
+    note.style.color = C_MUTED;
+    note.textContent = 'no connections yet';
+    panel.appendChild(note);
+  }
+
+  bodyEl.appendChild(panel);
 }
