@@ -1,11 +1,15 @@
-// Retrieve tab (milestone 3.3) — typed-query sweep + single-center selection (3.2c) PLUS
-// a streaming, CENTER-ONLY written summary rendered ABOVE the center card.
+// Retrieve tab (milestone 3.3 + 3.4a neighbor data layer) — typed-query sweep +
+// single-center selection (3.2c), a CENTER-ONLY streaming written summary ABOVE the card
+// (3.3), and the 3.4a neighbor data layer BELOW the card: read+decrypt the center's
+// connection blob, N-fetch each shown neighbor's content, render a TEMPORARY plain-text
+// readout. The readout is throwaway — it is REMOVED at 3.4b when the SVG ego-graph
+// replaces it. Still NO graph/SVG/nodes/spokes/layout — that is 3.4b.
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
-// reimplemented here. Still NO graph, NO neighbors, NO connection-blob read (those arrive
-// at 3.4): the summary is grounded in the CENTER memo alone.
-// The query is embedded LOCALLY and is never sent to our server. The streaming summary
-// calls api.anthropic.com directly with the user's own key, exactly as capture synthesis
-// does — the only plaintext leaving the browser is the prompt + center body, to Anthropic.
+// reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
+// streaming summary calls api.anthropic.com directly with the user's own key (capture
+// parity). The 3.4a neighbor layer talks ONLY to GET /api/memos/<id>/connection-blob
+// (ciphertext-only, merged in #10) and the existing GET /api/memos/<id> (ciphertext-only)
+// — no plaintext crosses the server, no batch endpoint, no /api or schema change.
 import { startLoadingEmbeddingModel, embedText, base64ToFloat32Array, topKNeighbors } from '/lib/embeddings.js';
 import { getSessionDEK } from '/crypto/session-dek.js';
 import { decryptStringWithDEK } from '/crypto/dek.js';
@@ -14,6 +18,11 @@ import { loadRetrievePromptV1 } from '/lib/prompts-loader.js';
 
 // Matches the server's EMBEDDINGS_PAGE_SIZE cap; pages the full corpus via ?limit=&cursor=.
 const SWEEP_PAGE_SIZE = 200;
+
+// Blob can hold up to 20 (K_NEIGHBORS in embeddings.js). Show only the top 8 in the debug
+// readout — keeps the temporary verification block legible. Same number will inform the
+// 3.4b SVG render budget, but this is debug-only for now.
+const NEIGHBOR_DISPLAY_COUNT = 8;
 
 export function mountRetrieve(container) {
   // app.html guards against a second mount, but clear defensively so a stray
@@ -201,16 +210,26 @@ export function mountRetrieve(container) {
         return;
       }
 
-      // 3.2c center card + 3.3 streaming summary ABOVE it. The card renders immediately
-      // (it does not depend on the LLM); then the written summary streams into the region
-      // above it. streamSummary handles its own errors and never throws, so a summary
-      // failure leaves the correct center card in place.
+      // 3.2c center card + 3.3 streaming summary ABOVE it + 3.4a neighbor debug readout
+      // BELOW it. The card renders immediately (it does not depend on the LLM or the
+      // blob); then the written summary streams into the region above it and the neighbor
+      // layer fills the region below it. streamSummary AND loadAndRenderNeighbors each
+      // handle their own errors and NEVER throw, so a summary failure OR a neighbor-layer
+      // failure leaves the correct center card in place and the other region intact.
       result.innerHTML = '';
       const { region: summaryRegion, textEl: summaryText } = buildSummaryRegion();
       result.appendChild(summaryRegion);
       result.appendChild(buildCenterCard(memo, center.score));
+      const { region: neighborsRegion, bodyEl: neighborsBody } = buildNeighborsDebugRegion();
+      result.appendChild(neighborsRegion);
 
-      await streamSummary(q, memo, summaryText);
+      // Run the summary stream and the neighbor data layer in parallel. Both are
+      // self-contained: each catches internally and resolves (never rejects), so
+      // Promise.all reliably awaits both. setBusy(false) flips only once both finish.
+      await Promise.all([
+        streamSummary(q, memo, summaryText),
+        loadAndRenderNeighbors(center.memo_id, dek, neighborsBody)
+      ]);
     } catch (err) {
       // Most likely the embedding model failed to load (CDN/network); never leave a blank panel.
       console.warn('[retrieve] sweep failed:', err);
@@ -302,4 +321,210 @@ function summaryErrorMessage(err) {
   if (code === 'LLM_AUTH') return 'Anthropic rejected the API key — the summary could not be generated.';
   if (code === 'LLM_RATELIMIT') return 'Anthropic is rate-limiting right now — try again in a moment.';
   return 'Could not generate a summary just now. Your best-match memo is shown below.';
+}
+
+// ---- 3.4a neighbor data layer (TEMPORARY debug readout — removed at 3.4b) ----
+//
+// Reads the center's connection blob, decrypts it with the session DEK, picks the top
+// neighbors by score, N-fetches each neighbor's content via the EXISTING /api/memos/<id>
+// endpoint, decrypts, and renders a plain-text block BELOW the center card so I can
+// eyeball-verify the round-trip before the SVG render lands at 3.4b.
+//
+// Fully self-contained error handling: every failure mode lands in the debug region; the
+// 3.2c center card and the 3.3 streaming summary do NOT depend on this and must keep
+// rendering even if everything below fails.
+
+// Empty debug region with a placeholder line — appended to the result column immediately
+// so the DOM order (summary, card, neighbors) is fixed before either async path resolves.
+function buildNeighborsDebugRegion() {
+  const region = document.createElement('div');
+  region.className = 'retrieve-neighbors-debug';
+  // Inline styles, deliberately: this block is throwaway (removed at 3.4b) and doesn't
+  // earn a CSS rule. The dashed border + bold header visually scream "debug".
+  region.style.margin = '16px 0 0';
+  region.style.padding = '8px';
+  region.style.border = '1px dashed #888';
+  region.style.background = '#f7f7f7';
+
+  const label = document.createElement('p');
+  label.className = 'small';
+  label.style.margin = '0 0 6px';
+  label.style.fontWeight = 'bold';
+  label.textContent = 'NEIGHBORS (debug — removed at 3.4b)';
+  region.appendChild(label);
+
+  const bodyEl = document.createElement('div');
+  const waiting = document.createElement('span');
+  waiting.className = 'small';
+  waiting.textContent = 'Loading neighbors…';
+  bodyEl.appendChild(waiting);
+  region.appendChild(bodyEl);
+
+  return { region, bodyEl };
+}
+
+// Read the center's connection blob, fetch+decrypt the top-N neighbors, render the
+// readout. Never throws: any uncaught path lands in the catch and shows an inline error.
+async function loadAndRenderNeighbors(centerId, dek, bodyEl) {
+  try {
+    // 1) GET the center's blob (ciphertext-only sibling of the content endpoint).
+    const r = await fetch(`/api/memos/${encodeURIComponent(centerId)}/connection-blob`, {
+      method: 'GET',
+      credentials: 'same-origin'
+    });
+    if (r.status === 401) { showNeighborsError(bodyEl, 'Session expired — re-unlock to load neighbors.'); return; }
+    if (r.status === 404) { showNeighborsError(bodyEl, 'Could not load the center memo blob (it may have just been deleted).'); return; }
+    if (!r.ok) { showNeighborsError(bodyEl, `Could not load neighbors (HTTP ${r.status}).`); return; }
+    const blobResponse = await r.json();
+
+    // 2) Null blob fields = the memo exists but was never connected (e.g. the very first
+    // memo, or one whose connect pass never finished). Treat as "no neighbors" honestly,
+    // distinct from a fetch error — no crash, no fabrication.
+    if (blobResponse.connection_blob_ciphertext == null || blobResponse.connection_blob_iv == null) {
+      showNoNeighbors(bodyEl);
+      return;
+    }
+
+    // 3) Decrypt + JSON.parse via the SAME path as 3.2c center-content decrypt. The
+    // blob plaintext shape (set by the connect pass in app.html) is:
+    //   { neighbors: [{ memo_id, score }, ...], scoring_fn_version: <string> }
+    // Field names are memo_id and score — NOT id and NOT cosine.
+    let blob;
+    try {
+      const plaintext = await decryptStringWithDEK(
+        blobResponse.connection_blob_ciphertext,
+        blobResponse.connection_blob_iv,
+        dek
+      );
+      blob = JSON.parse(plaintext);
+    } catch (err) {
+      console.warn('[retrieve] neighbor blob decrypt/parse failed:', err);
+      showNeighborsError(bodyEl, 'Found the neighbor set but could not decrypt it.');
+      return;
+    }
+
+    const allNeighbors = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
+    if (allNeighbors.length === 0) {
+      // The connect pass ran but produced an empty set (e.g. first memo). Honest signal.
+      showNoNeighbors(bodyEl);
+      return;
+    }
+
+    // 4) Top-N by score, descending. The blob holds up to K_NEIGHBORS (20) from the
+    // connect pass; we only display NEIGHBOR_DISPLAY_COUNT here.
+    const top = allNeighbors
+      .slice()
+      .sort((a, b) => (b.score || 0) - (a.score || 0))
+      .slice(0, NEIGHBOR_DISPLAY_COUNT);
+
+    // 5) N-fetch each neighbor's content via the EXISTING ciphertext-only endpoint.
+    // Documented forward-only / asymmetric-staleness tolerance: a neighbor that has since
+    // been deleted (404) or whose decrypt/parse fails is SKIPPED with a console.warn and
+    // counted, NEVER fatal. The readout still renders the resolved ones.
+    const resolved = [];
+    let skipped = 0;
+    for (const n of top) {
+      if (!n || typeof n.memo_id !== 'string') { skipped++; continue; }
+      try {
+        const cr = await fetch(`/api/memos/${encodeURIComponent(n.memo_id)}`, {
+          method: 'GET',
+          credentials: 'same-origin'
+        });
+        if (cr.status === 404) {
+          // Asymmetric staleness: this center's blob still points at a memo that no
+          // longer exists. Expected; skip and continue.
+          console.warn('[retrieve] neighbor missing (404), skipping:', n.memo_id);
+          skipped++;
+          continue;
+        }
+        if (!cr.ok) {
+          console.warn('[retrieve] neighbor fetch failed:', n.memo_id, cr.status);
+          skipped++;
+          continue;
+        }
+        const content = await cr.json();
+        const plaintext = await decryptStringWithDEK(content.memo_ciphertext, content.memo_iv, dek);
+        const neighborMemo = JSON.parse(plaintext);
+        resolved.push({
+          memo_id: n.memo_id,
+          title: (neighborMemo && neighborMemo.title) || '(untitled)',
+          summary: (neighborMemo && neighborMemo.summary) || '',
+          score: typeof n.score === 'number' ? n.score : 0
+        });
+      } catch (err) {
+        console.warn('[retrieve] neighbor decrypt/parse failed, skipping:', n.memo_id, err);
+        skipped++;
+      }
+    }
+
+    renderNeighborsReadout(bodyEl, allNeighbors.length, top.length, resolved, skipped);
+  } catch (err) {
+    // Unhandled network/runtime error before any per-neighbor work. Show an inline
+    // error; the card + summary above are unaffected.
+    console.warn('[retrieve] neighbor layer failed:', err);
+    showNeighborsError(bodyEl, 'Could not load neighbors (network or server error). The best-match memo is shown above.');
+  }
+}
+
+function showNeighborsError(bodyEl, text) {
+  bodyEl.innerHTML = '';
+  const p = document.createElement('p');
+  p.className = 'err';
+  p.style.margin = '0';
+  p.textContent = text;
+  bodyEl.appendChild(p);
+}
+
+function showNoNeighbors(bodyEl) {
+  bodyEl.innerHTML = '';
+  const p = document.createElement('p');
+  p.className = 'small';
+  p.style.margin = '0';
+  p.textContent = 'no neighbors for this memo';
+  bodyEl.appendChild(p);
+}
+
+// totalCount = neighbors in the blob; pickedCount = how many we tried to show (= min(N, total));
+// resolved = successfully fetched+decrypted subset; skipped = (pickedCount - resolved.length).
+function renderNeighborsReadout(bodyEl, totalCount, pickedCount, resolved, skipped) {
+  bodyEl.innerHTML = '';
+
+  // Header line: e.g. "blob: 12 neighbors · showing top 8 · 1 skipped (unfetchable)"
+  const summary = document.createElement('p');
+  summary.className = 'small';
+  summary.style.margin = '0 0 6px';
+  let line = `blob: ${totalCount} neighbors · showing top ${pickedCount}`;
+  if (skipped > 0) line += ` · ${skipped} skipped (unfetchable)`;
+  summary.textContent = line;
+  bodyEl.appendChild(summary);
+
+  if (resolved.length === 0) {
+    const none = document.createElement('p');
+    none.className = 'small';
+    none.style.margin = '0';
+    none.textContent = '(no neighbors could be fetched — all were unreadable)';
+    bodyEl.appendChild(none);
+    return;
+  }
+
+  // Plain ordered list: title · score · memo_id. textContent throughout so a malicious
+  // title can never inject HTML even in this debug surface.
+  const list = document.createElement('ol');
+  list.style.margin = '0';
+  list.style.paddingLeft = '20px';
+  for (const n of resolved) {
+    const li = document.createElement('li');
+
+    const title = document.createElement('strong');
+    title.textContent = n.title;
+    li.appendChild(title);
+
+    const rest = document.createElement('span');
+    rest.className = 'small';
+    rest.textContent = ` · score ${n.score.toFixed(3)} · ${n.memo_id}`;
+    li.appendChild(rest);
+
+    list.appendChild(li);
+  }
+  bodyEl.appendChild(list);
 }
