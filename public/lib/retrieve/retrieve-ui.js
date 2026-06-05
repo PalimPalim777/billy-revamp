@@ -522,6 +522,7 @@ async function fetchOneNeighborAdjacency(memoId, dek) {
     );
     const blob = JSON.parse(plaintext);
     const list = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
+    console.log('[3.5-debug] raw blob.neighbors memo_ids of', memoId, '=', JSON.stringify(list.map(e => e && e.memo_id)));
     for (const e of list) {
       // Same field names as the center blob: { memo_id, score }.
       if (e && typeof e.memo_id === 'string' && typeof e.score === 'number') {
@@ -544,6 +545,10 @@ async function fetchOneNeighborAdjacency(memoId, dek) {
 // pairs; renderEgoGraph maps each id to its ring position.
 function computeMutualEdges(resolved, adjacency) {
   const edges = [];
+  console.log('[3.5-debug] resolved memo_ids =', JSON.stringify(resolved.map(x => x.memo_id)));
+  for (const [k, m] of adjacency) {
+    console.log('[3.5-debug] adjacency key', k, 'size=', m.size, 'keys=', JSON.stringify(Array.from(m.keys())));
+  }
   for (let i = 0; i < resolved.length; i++) {
     for (let j = i + 1; j < resolved.length; j++) {
       const A = resolved[i];
@@ -554,6 +559,9 @@ function computeMutualEdges(resolved, adjacency) {
       const sAB = aOut.get(B.memo_id);
       const sBA = bOut.get(A.memo_id);
       console.log('[3.5-debug] pair', A.memo_id, B.memo_id, 'sAB=', sAB, 'sBA=', sBA, 'min=', (typeof sAB==='number'&&typeof sBA==='number')?Math.min(sAB,sBA):'N/A', 'threshold=', INTER_NEIGHBOR_EDGE_THRESHOLD);
+      if ((typeof sAB === 'number') !== (typeof sBA === 'number')) {
+        console.log('[3.5-debug] ASYMMETRIC pair: A=', A.memo_id, 'B=', B.memo_id, '| aOut.size=', aOut.size, 'bOut.size=', bOut.size, '| aOut.has(B)=', aOut.has(B.memo_id), 'bOut.has(A)=', bOut.has(A.memo_id));
+      }
       if (typeof sAB !== 'number' || typeof sBA !== 'number') continue; // not mutual
       if (Math.min(sAB, sBA) >= INTER_NEIGHBOR_EDGE_THRESHOLD) {
         edges.push({ a: A.memo_id, b: B.memo_id });
