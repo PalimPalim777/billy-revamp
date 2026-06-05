@@ -3,8 +3,9 @@
 // the 3.4b ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
 // feeds a hand-rolled inline SVG — center node + a radial ring of score-sized neighbor
-// nodes + center↔neighbor spokes + hover-for-full-title labels. NO inter-neighbor edges
-// (3.5), NO click-to-recenter (3.6), NO double-click overlay (3.7), NO mobile tuning (3.8).
+// nodes + center↔neighbor spokes + hover-for-full-title labels + (3.5) thin dashed,
+// thresholded (union/directed) neighbor↔neighbor edges. NO pass-through dots (deferred), NO click-to-recenter
+// (3.6), NO double-click overlay (3.7), NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
 // streaming summary calls api.anthropic.com directly with the user's own key (capture
@@ -20,10 +21,16 @@ import { loadRetrievePromptV1 } from '/lib/prompts-loader.js';
 // Matches the server's EMBEDDINGS_PAGE_SIZE cap; pages the full corpus via ?limit=&cursor=.
 const SWEEP_PAGE_SIZE = 200;
 
-// Blob can hold up to 20 (K_NEIGHBORS in embeddings.js). Show only the top 8 in the debug
-// readout — keeps the temporary verification block legible. Same number will inform the
-// 3.4b SVG render budget, but this is debug-only for now.
+// The center blob can hold up to 20 neighbors (K_NEIGHBORS in embeddings.js). The ego-graph
+// draws only the top 8 by score, to keep the ring (and its inter-neighbor edges) legible.
 const NEIGHBOR_DISPLAY_COUNT = 8;
+
+// 3.5 inter-neighbor edges: draw a neighbor↔neighbor edge when EITHER of the two visible
+// neighbors lists the other in its own blob (union/directed — connection blobs are forward-only
+// / write-once, so a pair is almost never listed in both directions) AND the qualifying score — the MAX of
+// the present directional score(s) — is >= this threshold. Below it the connection exists but no
+// edge is drawn (the graph is not a complete mesh).
+const INTER_NEIGHBOR_EDGE_THRESHOLD = 0.6;
 
 export function mountRetrieve(container) {
   // app.html guards against a second mount, but clear defensively so a stray
@@ -451,16 +458,114 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
       }
     }
 
-    // Draw the ego-graph from the resolved set. If every picked neighbor was unfetchable
-    // (resolved empty but the blob had neighbors), renderEgoGraph falls back to the lone
-    // center node — honest, no crash, no empty ring.
-    renderEgoGraph(bodyEl, center, resolved);
+    // 6) (3.5) Inter-neighbor edges. Fetch each RESOLVED neighbor's OWN connection blob
+    // (the SAME GET /api/memos/<id>/connection-blob + DEK-decrypt + JSON.parse path as the
+    // center blob above — no new endpoint, no batch, no plaintext to our server) to learn
+    // that neighbor's outgoing connections, then keep union/directed, thresholded pairs (an
+    // edge when EITHER neighbor lists the other) among the on-screen neighbors. A per-neighbor
+    // blob failure yields no outgoing edges for that neighbor (fewer edges, never fatal). This
+    // stays inside the same try as everything else, so an edge-layer error is isolated to the
+    // graph region — card + summary are unaffected.
+    const adjacency = await fetchNeighborAdjacencies(resolved, dek);
+    const edges = computeInterNeighborEdges(resolved, adjacency);
+
+    // Draw the ego-graph from the resolved set + the inter-neighbor edge set. If every picked
+    // neighbor was unfetchable (resolved empty but the blob had neighbors), renderEgoGraph
+    // falls back to the lone center node — honest, no crash, no empty ring. No qualifying
+    // edges → exactly the 3.4b look (spokes + nodes, no inter-edges).
+    renderEgoGraph(bodyEl, center, resolved, edges);
   } catch (err) {
     // Unhandled network/runtime error before any per-neighbor work. Show an inline
     // error; the card + summary above are unaffected.
     console.warn('[retrieve] neighbor layer failed:', err);
     showGraphError(bodyEl, 'Could not load neighbors (network or server error). The best-match memo is shown above.');
   }
+}
+
+// ---- 3.5 inter-neighbor edge data ----
+//
+// For each RESOLVED (on-screen) neighbor, read its OWN connection blob via the SAME
+// ciphertext-only endpoint + DEK-decrypt + JSON.parse path used for the center blob (no new
+// endpoint, no batch, no plaintext to our server) and project it to a { targetMemoId → score }
+// map of that neighbor's outgoing connections. Per-neighbor tolerance: a null/empty blob, a
+// 404/!ok fetch, or a decrypt/parse failure yields an EMPTY map (console.warn) — that neighbor
+// simply contributes no edges. Missing blob data means fewer edges, NEVER a crash.
+async function fetchNeighborAdjacencies(resolved, dek) {
+  const adjacency = new Map(); // memo_id → Map(targetMemoId → score)
+  for (const nb of resolved) {
+    adjacency.set(nb.memo_id, await fetchOneNeighborAdjacency(nb.memo_id, dek));
+  }
+  return adjacency;
+}
+
+// One neighbor's outgoing connections as Map(targetMemoId → score). Never throws: every
+// failure path returns an empty map so the edge computation just sees no outgoing edges.
+async function fetchOneNeighborAdjacency(memoId, dek) {
+  const out = new Map();
+  try {
+    const r = await fetch(`/api/memos/${encodeURIComponent(memoId)}/connection-blob`, {
+      method: 'GET',
+      credentials: 'same-origin'
+    });
+    if (!r.ok) {
+      // 404 (since-deleted), 401, 5xx — treat as "no outgoing edges", not fatal.
+      console.warn('[retrieve] neighbor blob fetch failed, no edges for:', memoId, r.status);
+      return out;
+    }
+    const blobResponse = await r.json();
+    // Null fields = this neighbor exists but was never connected → no outgoing edges.
+    if (blobResponse.connection_blob_ciphertext == null || blobResponse.connection_blob_iv == null) {
+      return out;
+    }
+    const plaintext = await decryptStringWithDEK(
+      blobResponse.connection_blob_ciphertext,
+      blobResponse.connection_blob_iv,
+      dek
+    );
+    const blob = JSON.parse(plaintext);
+    const list = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
+    for (const e of list) {
+      // Same field names as the center blob: { memo_id, score }.
+      if (e && typeof e.memo_id === 'string' && typeof e.score === 'number') {
+        out.set(e.memo_id, e.score);
+      }
+    }
+  } catch (err) {
+    console.warn('[retrieve] neighbor blob decrypt/parse failed, no edges for:', memoId, err);
+  }
+  return out;
+}
+
+// UNION (directed) thresholded edge set among the ON-SCREEN neighbors ONLY. Connection blobs
+// are forward-only / write-once: a memo's blob lists the memos that existed when it was
+// captured and is never back-filled, so for any pair almost exactly ONE direction is ever
+// present and the pair is virtually never listed in both directions. We therefore draw an edge when
+// EITHER direction lists the other at >= INTER_NEIGHBOR_EDGE_THRESHOLD, using the MAX of the
+// present directional score(s) as the qualifying score. Neither direction present → no edge
+// (the two memos genuinely never listed each other). Off-screen ids a blob may reference are
+// ignored because we only test ids that are themselves in the resolved set. Returns { a, b }
+// memo_id pairs; renderEgoGraph maps each id to its ring position.
+function computeInterNeighborEdges(resolved, adjacency) {
+  const edges = [];
+  for (let i = 0; i < resolved.length; i++) {
+    for (let j = i + 1; j < resolved.length; j++) {
+      const A = resolved[i];
+      const B = resolved[j];
+      // Directional scores from each neighbor's OWN blob (either may be absent — blobs are
+      // forward-only, so a pair is almost never listed in both directions).
+      const sAB = adjacency.get(A.memo_id)?.get(B.memo_id);
+      const sBA = adjacency.get(B.memo_id)?.get(A.memo_id);
+      const present = [];
+      if (typeof sAB === 'number') present.push(sAB);
+      if (typeof sBA === 'number') present.push(sBA);
+      if (present.length === 0) continue; // neither lists the other → no edge
+      // Union: qualify on the MAX of whichever direction(s) exist.
+      if (Math.max(...present) >= INTER_NEIGHBOR_EDGE_THRESHOLD) {
+        edges.push({ a: A.memo_id, b: B.memo_id });
+      }
+    }
+  }
+  return edges;
 }
 
 // Inline error in the graph region. Reuses the app's .err token (#b00020). The center
@@ -479,10 +584,10 @@ function showGraphError(bodyEl, text) {
 // ---- 3.4b ego-graph SVG render ----
 //
 // Hand-rolled inline SVG (no library, no new dependency). Single radial ring: the center
-// node in the middle, the resolved neighbors evenly spaced on one circle around it, a
-// spoke from the center to each neighbor (center↔neighbor ONLY — no neighbor↔neighbor
-// edges; that is 3.5), neighbor radius scaled by cosine score (center stays largest), and
-// a truncated label per node with the full title in an SVG <title> for hover. Styling
+// node in the middle, the resolved neighbors evenly spaced on one circle around it, a spoke
+// from the center to each neighbor, (3.5) thin dashed edges between related neighbors (union/directed)
+// (distinct from the spokes), neighbor radius scaled by cosine score (center stays largest),
+// and a truncated label per node with the full title in an SVG <title> for hover. Styling
 // inherits the app's existing design tokens (see makeGraphPanel / the scoped <style>).
 //
 // Colours/sizes are LOCAL constants so the whole graph is tunable in one place. All text
@@ -509,7 +614,14 @@ const C_INK_BODY = '#222';       // label ink
 const C_MUTED = '#888';          // captions
 const C_NODE_FILL = '#fff';      // neighbor fill (card surface)
 const C_NODE_STROKE = '#111';    // neighbor stroke
-const C_SPOKE = '#dcdcdc';       // spokes (subtle, ~ the app's #ddd lines)
+const C_SPOKE = '#dcdcdc';       // center spokes (subtle, ~ the app's #ddd lines), solid 1.5
+
+// 3.5 inter-neighbor edges: deliberately DISTINCT from the solid grey center spokes — a muted
+// blue, dashed, lighter weight — so a center spoke vs a neighbor↔neighbor edge reads at a
+// glance. UNIFORM (not scaled by strength; node size already encodes magnitude).
+const C_INTER_EDGE = '#7aa7d6';  // muted blue (vs the grey spokes)
+const INTER_EDGE_WIDTH = 1;      // lighter than the 1.5 spokes
+const INTER_EDGE_DASH = '5 4';   // dashed (vs solid spokes)
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS(SVG_NS, tag);
@@ -551,8 +663,10 @@ function makeGraphPanel() {
 }
 
 // Draw the ego-graph. center = { memo_id, title, score }; neighbors = resolved set
-// [{ memo_id, title, summary, score }]. An empty neighbors array → lone center node.
-function renderEgoGraph(bodyEl, center, neighbors) {
+// [{ memo_id, title, summary, score }]; edges = inter-neighbor pairs [{ a, b }] of
+// neighbor memo_ids (3.5; may be omitted/empty). An empty neighbors array → lone center node;
+// an empty/omitted edges array → exactly the 3.4b look (spokes + nodes, no inter-edges).
+function renderEgoGraph(bodyEl, center, neighbors, edges) {
   bodyEl.innerHTML = '';
   const panel = makeGraphPanel();
 
@@ -600,6 +714,26 @@ function renderEgoGraph(bodyEl, center, neighbors) {
       x1: GRAPH_CX, y1: GRAPH_CY, x2: p.x, y2: p.y,
       stroke: C_SPOKE, 'stroke-width': 1.5
     }));
+  }
+
+  // ---- inter-neighbor edges (3.5): above the spokes, still BEHIND every node ----
+  // Order: center spokes are the base layer; the inter-neighbor edges (the new 3.5 signal)
+  // overlay them so they are never occluded by a spoke; both stay behind the nodes, which are
+  // drawn afterward. Each edge is one straight line between two neighbor positions, uniform
+  // and visually distinct from the spokes (dashed, muted blue). NO pass-through dots where an
+  // edge happens to cross an unrelated node (deferred).
+  if (edges && edges.length) {
+    const posById = new Map(positions.map(p => [p.n.memo_id, p]));
+    for (const e of edges) {
+      const pa = posById.get(e.a);
+      const pb = posById.get(e.b);
+      if (!pa || !pb) continue; // defensive: only on-screen pairs are drawable
+      svg.appendChild(svgEl('line', {
+        x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y,
+        stroke: C_INTER_EDGE, 'stroke-width': INTER_EDGE_WIDTH,
+        'stroke-dasharray': INTER_EDGE_DASH, 'stroke-linecap': 'round'
+      }));
+    }
   }
 
   // ---- neighbor nodes (on top of spokes) ----
