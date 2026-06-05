@@ -1,11 +1,16 @@
-// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph) — typed-query sweep +
-// single-center selection (3.2c), a CENTER-ONLY streaming written summary ABOVE (3.3), and
-// the 3.4b ego-graph BETWEEN the summary and the center card: the 3.4a data layer
+// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot) —
+// typed-query sweep + single-center selection (3.2c), a CENTER-ONLY streaming written summary
+// ABOVE (3.3), and the ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
 // feeds a hand-rolled inline SVG — center node + a radial ring of score-sized neighbor
 // nodes + center↔neighbor spokes + hover-for-full-title labels + (3.5) thin dashed,
-// thresholded (union/directed) neighbor↔neighbor edges. NO pass-through dots (deferred), NO click-to-recenter
-// (3.6), NO double-click overlay (3.7), NO mobile tuning (3.8).
+// thresholded (union/directed) neighbor↔neighbor edges. (3.6a) The post-center-selection
+// render (graph + center card) is extracted into renderEgoGraphForCenter(), shared by the
+// typed-query flow and a single-click PIVOT: clicking a NEIGHBOR node re-centers the graph on
+// that memo with NO LLM call and NO corpus sweep (fetch+decrypt that memo by id, redraw graph
+// + card in place, summary above left untouched). A ~240ms click/double-click disambiguator
+// reserves double-click for the 3.7 overlay. NO pass-through dots (deferred), NO breadcrumbs/
+// origin/return-to-origin (3.6b), NO double-click overlay yet (3.7), NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
 // streaming summary calls api.anthropic.com directly with the user's own key (capture
@@ -135,12 +140,89 @@ export function mountRetrieve(container) {
     }
 
     // Surfaced for this milestone's verifiability — the cosine score the center won with.
-    const scoreLine = document.createElement('p');
-    scoreLine.className = 'small';
-    scoreLine.textContent = `Best match · cosine ${score.toFixed(3)}`;
-    card.appendChild(scoreLine);
+    // Only the typed-query best match has a cosine score; a 3.6a pivot center has none (no
+    // sweep), so the line is omitted there rather than printing a meaningless 0.
+    if (typeof score === 'number' && isFinite(score)) {
+      const scoreLine = document.createElement('p');
+      scoreLine.className = 'small';
+      scoreLine.textContent = `Best match · cosine ${score.toFixed(3)}`;
+      card.appendChild(scoreLine);
+    }
 
     return card;
+  }
+
+  // ---- 3.6a shared center renderer (typed-query render path AND single-click pivot) ----
+  //
+  // Owns the ego-graph + center card ONLY — the region BELOW the streaming summary. It renders
+  // the graph + card for `centerMemoId`, replacing any previously rendered graph + card IN
+  // PLACE while leaving the summary element ABOVE it untouched (DOM order: summary → graph →
+  // card). Deliberately self-contained: it never embeds text, never sweeps the corpus, and
+  // never calls the LLM — so a neighbor click can re-center with NO model and no network beyond
+  // the same blob + content reads the typed flow already does. Never throws (mirrors the other
+  // render helpers), so it is safe both inside the typed flow's Promise.all and on a bare pivot.
+  //
+  //   centerMemoId — the memo to center on (its memo_id); used for the blob + content reads.
+  //   centerMemo   — typed-query path passes the center memo it already decrypted (avoids a
+  //                  double fetch) and carries the winning cosine score on it (memo.cosineScore)
+  //                  so the card + center node can surface it. The pivot path omits it (null) →
+  //                  we fetch + decrypt that memo by id via the SAME fetch + decryptStringWithDEK
+  //                  + JSON.parse path the neighbor loop uses (no new decrypt helper), and it has
+  //                  no cosine score → the card + center node omit the "best match" line.
+  async function renderEgoGraphForCenter(centerMemoId, centerMemo = null) {
+    const isPivot = (centerMemo == null);
+
+    // Replace the prior cluster (graph + center card) so a pivot re-centers in place. The
+    // summary ABOVE (.retrieve-summary) is intentionally NOT matched here → it stays visible
+    // and unchanged. On the first typed-query render there is nothing to remove yet.
+    result.querySelectorAll(':scope > .retrieve-graph, :scope > .memo-card')
+      .forEach(el => el.remove());
+
+    // Graph region first (placeholder); the center card is appended below it once we have the
+    // memo → DOM order stays summary → graph → card.
+    const { region: graphRegion, bodyEl: graphBody } = buildGraphRegion();
+    result.appendChild(graphRegion);
+
+    // Pivot path: no DEK / memo in hand. Derive the session DEK, then fetch + decrypt the
+    // center's own content by id reusing the SAME path the neighbor loop uses. Every failure
+    // lands in the graph region; the summary above is untouched.
+    let dek = null;
+    if (isPivot) {
+      dek = await getSessionDEK();
+      if (!dek) { showGraphError(graphBody, 'Your session is locked — re-unlock to open this memo.'); return; }
+      try {
+        const cr = await fetch(`/api/memos/${encodeURIComponent(centerMemoId)}`, {
+          method: 'GET', credentials: 'same-origin'
+        });
+        if (cr.status === 404) { showGraphError(graphBody, 'That memo could not be loaded (it may have just been deleted).'); return; }
+        if (!cr.ok) { showGraphError(graphBody, `Could not load that memo (HTTP ${cr.status}).`); return; }
+        const content = await cr.json();
+        const plaintext = await decryptStringWithDEK(content.memo_ciphertext, content.memo_iv, dek);
+        centerMemo = JSON.parse(plaintext);
+      } catch (err) {
+        console.warn('[retrieve] pivot center fetch/decrypt failed:', centerMemoId, err);
+        showGraphError(graphBody, 'Found that memo but could not decrypt it.');
+        return;
+      }
+    }
+
+    // Cosine score is meaningful only for the typed-query best match (the typed flow stashes it
+    // on the memo); a pivot has none → null, and the card + center node omit the cosine line.
+    const score = (centerMemo && typeof centerMemo.cosineScore === 'number') ? centerMemo.cosineScore : null;
+
+    // Center card BELOW the graph.
+    result.appendChild(buildCenterCard(centerMemo, score));
+
+    // The typed-query path still needs a DEK for the neighbor content/blob reads (its sweep DEK
+    // is out of scope here, and the signature stays at the two documented args). getSessionDEK
+    // is idempotent — re-deriving it from sessionStorage is cheap and never hits the network.
+    if (!dek) dek = await getSessionDEK();
+    if (!dek) { showGraphError(graphBody, 'Your session is locked — re-unlock to load neighbors.'); return; }
+
+    // Neighbor data layer + ego-graph render (self-contained; never throws). The onPivot
+    // callback lets a single-click on any NEIGHBOR re-center on it — centerMemo omitted so this
+    // very function fetches that memo by id (the pivot path above).
+    await loadAndRenderNeighbors(centerMemoId, centerMemo, score, dek, graphBody, (memoId) => renderEgoGraphForCenter(memoId));
   }
 
   async function submit() {
@@ -218,25 +300,26 @@ export function mountRetrieve(container) {
         return;
       }
 
-      // 3.2c center card + 3.3 streaming summary ABOVE it + 3.4b ego-graph BETWEEN them.
-      // Final DOM order: summary → graph → center card. The card renders immediately (it
-      // depends on neither the LLM nor the blob); the summary streams into the region above
-      // and the ego-graph fills the region between. streamSummary AND loadAndRenderNeighbors
-      // each handle their own errors and NEVER throw, so a summary failure OR a graph/neighbor
-      // failure leaves the correct center card in place and the other regions intact.
+      // 3.2c center card + 3.3 streaming summary ABOVE it + the ego-graph BETWEEN them.
+      // Final DOM order: summary → graph → center card. The summary streams into the region
+      // above; the graph + center card are built and filled by the extracted
+      // renderEgoGraphForCenter (the SAME renderer the 3.6a pivot uses). streamSummary AND
+      // renderEgoGraphForCenter each handle their own errors and NEVER throw, so a summary
+      // failure OR a graph/neighbor failure leaves the other regions intact.
       result.innerHTML = '';
       const { region: summaryRegion, textEl: summaryText } = buildSummaryRegion();
       result.appendChild(summaryRegion);
-      const { region: graphRegion, bodyEl: graphBody } = buildGraphRegion();
-      result.appendChild(graphRegion);
-      result.appendChild(buildCenterCard(memo, center.score));
 
-      // Run the summary stream and the neighbor data layer in parallel. Both are
+      // Carry the winning cosine score on the (already-decrypted) center memo so the shared
+      // renderer can surface it on the card + center node. A 3.6a pivot has no score → omitted.
+      memo.cosineScore = center.score;
+
+      // Run the summary stream and the graph + card render in parallel. Both are
       // self-contained: each catches internally and resolves (never rejects), so
       // Promise.all reliably awaits both. setBusy(false) flips only once both finish.
       await Promise.all([
         streamSummary(q, memo, summaryText),
-        loadAndRenderNeighbors(center.memo_id, memo, center.score, dek, graphBody)
+        renderEgoGraphForCenter(center.memo_id, memo)
       ]);
     } catch (err) {
       // Most likely the embedding model failed to load (CDN/network); never leave a blank panel.
@@ -363,9 +446,12 @@ function buildGraphRegion() {
 // Read the center's connection blob, fetch+decrypt the top-N neighbors, draw the graph.
 // Never throws: any uncaught path lands in the catch and shows an inline error.
 //   centerId    — the center memo's id (memo_id), used for the blob fetch.
-//   centerMemo  — the already-decrypted 3.2c center memo { title, body, summary, ... }.
-//   centerScore — the center's cosine score (for the center node's hover title).
-async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bodyEl) {
+//   centerMemo  — the already-decrypted center memo { title, body, summary, ... }.
+//   centerScore — the center's cosine score for the center node's hover title, or null for a
+//                 3.6a pivot center (no sweep → no score; the hover then shows the title only).
+//   onPivot     — (3.6a) callback(neighborMemoId) a NEIGHBOR single-click invokes to re-center
+//                 the graph on that neighbor; threaded straight through to renderEgoGraph.
+async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bodyEl, onPivot) {
   const center = { memo_id: centerId, title: (centerMemo && centerMemo.title) || '(untitled)', score: centerScore };
   try {
     // 1) GET the center's blob (ciphertext-only sibling of the content endpoint).
@@ -382,7 +468,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     // memo, or one whose connect pass never finished). Draw the center node ALONE — an
     // honest "no connections yet" graph, distinct from a fetch error. No crash, no ring.
     if (blobResponse.connection_blob_ciphertext == null || blobResponse.connection_blob_iv == null) {
-      renderEgoGraph(bodyEl, center, []);
+      renderEgoGraph(bodyEl, center, [], [], onPivot);
       return;
     }
 
@@ -407,7 +493,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     const allNeighbors = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
     if (allNeighbors.length === 0) {
       // The connect pass ran but produced an empty set (e.g. first memo). Lone center node.
-      renderEgoGraph(bodyEl, center, []);
+      renderEgoGraph(bodyEl, center, [], [], onPivot);
       return;
     }
 
@@ -473,7 +559,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     // neighbor was unfetchable (resolved empty but the blob had neighbors), renderEgoGraph
     // falls back to the lone center node — honest, no crash, no empty ring. No qualifying
     // edges → exactly the 3.4b look (spokes + nodes, no inter-edges).
-    renderEgoGraph(bodyEl, center, resolved, edges);
+    renderEgoGraph(bodyEl, center, resolved, edges, onPivot);
   } catch (err) {
     // Unhandled network/runtime error before any per-neighbor work. Show an inline
     // error; the card + summary above are unaffected.
@@ -623,6 +709,10 @@ const C_INTER_EDGE = '#7aa7d6';  // muted blue (vs the grey spokes)
 const INTER_EDGE_WIDTH = 1;      // lighter than the 1.5 spokes
 const INTER_EDGE_DASH = '5 4';   // dashed (vs solid spokes)
 
+// 3.6a click/double-click disambiguation window (ms). A single-click pivot waits this long
+// before firing so a double-click — reserved for the 3.7 full-memo overlay — can pre-empt it.
+const CLICK_DISAMBIG_MS = 240;
+
 function svgEl(tag, attrs) {
   const el = document.createElementNS(SVG_NS, tag);
   if (attrs) for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
@@ -666,7 +756,10 @@ function makeGraphPanel() {
 // [{ memo_id, title, summary, score }]; edges = inter-neighbor pairs [{ a, b }] of
 // neighbor memo_ids (3.5; may be omitted/empty). An empty neighbors array → lone center node;
 // an empty/omitted edges array → exactly the 3.4b look (spokes + nodes, no inter-edges).
-function renderEgoGraph(bodyEl, center, neighbors, edges) {
+// (3.6a) onPivot(neighborMemoId) — invoked by a NEIGHBOR single-click to re-center the graph
+// on that neighbor; the center node is NOT wired. center.score may be null for a pivot center
+// (no sweep) → its hover then shows the title alone (no "best match · cosine …").
+function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot) {
   bodyEl.innerHTML = '';
   const panel = makeGraphPanel();
 
@@ -685,10 +778,12 @@ function renderEgoGraph(bodyEl, center, neighbors, edges) {
   svg.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif';
 
   // Scoped hover styling: emphasize a node's stroke and bold its label on hover. Desktop
-  // hover only (mobile tap is 3.8). cursor:default — neighbors are NOT clickable-to-pivot.
+  // hover only (mobile tap is 3.8). (3.6a) NEIGHBOR nodes are single-click pivot targets →
+  // cursor:pointer; the center node is NOT a pivot target → it keeps the default cursor.
   const style = svgEl('style');
   style.textContent = `
     .ego-node { cursor: default; }
+    .ego-neighbor { cursor: pointer; }
     .ego-neighbor circle { transition: stroke-width .12s ease; }
     .ego-neighbor:hover circle { stroke-width: 3; }
     .ego-neighbor:hover .ego-label { font-weight: 600; fill: ${C_INK}; }
@@ -737,11 +832,42 @@ function renderEgoGraph(bodyEl, center, neighbors, edges) {
   }
 
   // ---- neighbor nodes (on top of spokes) ----
+  // One disambiguation timer shared across this render's neighbor nodes (the user clicks one
+  // node at a time): a single-click arms it; the 2nd click of a double-click cancels it. (3.6a)
+  let pendingClickTimer = null;
   const scoreToRadius = count ? makeScoreToRadius(neighbors) : null;
   for (const p of positions) {
     const r = scoreToRadius(typeof p.n.score === 'number' ? p.n.score : 0);
 
     const g = svgEl('g', { class: 'ego-node ego-neighbor' });
+
+    // (3.6a) Single-click this NEIGHBOR to re-center the graph on it (pivot). The ~240ms
+    // disambiguator holds the single-click action briefly so a double-click can pre-empt it,
+    // reserving double-click for the 3.7 full-memo overlay without a pivot firing underneath.
+    // The center node deliberately gets NO pivot handlers (it is not a pivot target).
+    if (onPivot) {
+      const neighborMemoId = p.n.memo_id;
+      g.addEventListener('click', () => {
+        if (pendingClickTimer !== null) {
+          // 2nd click of a double-click → cancel the pending pivot; let dblclick handle it.
+          clearTimeout(pendingClickTimer);
+          pendingClickTimer = null;
+          return;
+        }
+        pendingClickTimer = setTimeout(() => {
+          pendingClickTimer = null;
+          // centerMemo omitted → renderEgoGraphForCenter fetches + decrypts this memo by id.
+          onPivot(neighborMemoId);
+        }, CLICK_DISAMBIG_MS);
+      });
+      g.addEventListener('dblclick', () => {
+        if (pendingClickTimer !== null) {
+          clearTimeout(pendingClickTimer);
+          pendingClickTimer = null;
+        }
+        // 3.7 PLACEHOLDER: full-memo overlay goes here. NO-OP in 3.6a. Leave this comment.
+      });
+    }
 
     const circle = svgEl('circle', {
       cx: p.x, cy: p.y, r: r,
@@ -774,7 +900,12 @@ function renderEgoGraph(bodyEl, center, neighbors, edges) {
   // ---- center node last (largest, on top) ----
   const cg = svgEl('g', { class: 'ego-node ego-center' });
   const cTip = svgEl('title');
-  cTip.textContent = `${center.title || '(untitled)'} · best match · cosine ${Number(center.score || 0).toFixed(3)}`;
+  // Typed-query center is the "best match" with a cosine score; a 3.6a pivot center has no
+  // score (no sweep) → show its title alone, not a misleading "best match · cosine 0.000".
+  const centerScoreSuffix = (typeof center.score === 'number')
+    ? ` · best match · cosine ${center.score.toFixed(3)}`
+    : '';
+  cTip.textContent = `${center.title || '(untitled)'}${centerScoreSuffix}`;
   cg.appendChild(cTip);
   cg.appendChild(svgEl('circle', {
     cx: GRAPH_CX, cy: GRAPH_CY, r: CENTER_NODE_R,
