@@ -3,8 +3,8 @@
 // the 3.4b ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
 // feeds a hand-rolled inline SVG — center node + a radial ring of score-sized neighbor
-// nodes + center↔neighbor spokes + hover-for-full-title labels + (3.5) thin dashed mutual,
-// thresholded neighbor↔neighbor edges. NO pass-through dots (deferred), NO click-to-recenter
+// nodes + center↔neighbor spokes + hover-for-full-title labels + (3.5) thin dashed,
+// thresholded (union/directed) neighbor↔neighbor edges. NO pass-through dots (deferred), NO click-to-recenter
 // (3.6), NO double-click overlay (3.7), NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
@@ -25,10 +25,11 @@ const SWEEP_PAGE_SIZE = 200;
 // draws only the top 8 by score, to keep the ring (and its inter-neighbor edges) legible.
 const NEIGHBOR_DISPLAY_COUNT = 8;
 
-// 3.5 inter-neighbor edges: draw a neighbor↔neighbor edge ONLY when the two visible neighbors
-// MUTUALLY list each other (in both of their own blobs) AND the qualifying score — the MIN of
-// the two directional scores, so BOTH directions must clear the bar — is >= this threshold.
-// Below it the connection exists but no edge is drawn (the graph is not a complete mesh).
+// 3.5 inter-neighbor edges: draw a neighbor↔neighbor edge when EITHER of the two visible
+// neighbors lists the other in its own blob (union/directed — connection blobs are forward-only
+// / write-once, so a pair is almost never listed in both directions) AND the qualifying score — the MAX of
+// the present directional score(s) — is >= this threshold. Below it the connection exists but no
+// edge is drawn (the graph is not a complete mesh).
 const INTER_NEIGHBOR_EDGE_THRESHOLD = 0.6;
 
 export function mountRetrieve(container) {
@@ -460,14 +461,15 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     // 6) (3.5) Inter-neighbor edges. Fetch each RESOLVED neighbor's OWN connection blob
     // (the SAME GET /api/memos/<id>/connection-blob + DEK-decrypt + JSON.parse path as the
     // center blob above — no new endpoint, no batch, no plaintext to our server) to learn
-    // that neighbor's outgoing connections, then keep only MUTUAL, thresholded pairs among
-    // the on-screen neighbors. A per-neighbor blob failure yields no outgoing edges for that
-    // neighbor (fewer edges, never fatal). This stays inside the same try as everything else,
-    // so an edge-layer error is isolated to the graph region — card + summary are unaffected.
+    // that neighbor's outgoing connections, then keep union/directed, thresholded pairs (an
+    // edge when EITHER neighbor lists the other) among the on-screen neighbors. A per-neighbor
+    // blob failure yields no outgoing edges for that neighbor (fewer edges, never fatal). This
+    // stays inside the same try as everything else, so an edge-layer error is isolated to the
+    // graph region — card + summary are unaffected.
     const adjacency = await fetchNeighborAdjacencies(resolved, dek);
-    const edges = computeMutualEdges(resolved, adjacency);
+    const edges = computeInterNeighborEdges(resolved, adjacency);
 
-    // Draw the ego-graph from the resolved set + the mutual edge set. If every picked
+    // Draw the ego-graph from the resolved set + the inter-neighbor edge set. If every picked
     // neighbor was unfetchable (resolved empty but the blob had neighbors), renderEgoGraph
     // falls back to the lone center node — honest, no crash, no empty ring. No qualifying
     // edges → exactly the 3.4b look (spokes + nodes, no inter-edges).
@@ -522,7 +524,6 @@ async function fetchOneNeighborAdjacency(memoId, dek) {
     );
     const blob = JSON.parse(plaintext);
     const list = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
-    console.log('[3.5-debug] raw blob.neighbors memo_ids of', memoId, '=', JSON.stringify(list.map(e => e && e.memo_id)));
     for (const e of list) {
       // Same field names as the center blob: { memo_id, score }.
       if (e && typeof e.memo_id === 'string' && typeof e.score === 'number') {
@@ -532,43 +533,38 @@ async function fetchOneNeighborAdjacency(memoId, dek) {
   } catch (err) {
     console.warn('[retrieve] neighbor blob decrypt/parse failed, no edges for:', memoId, err);
   }
-  console.log('[3.5-debug] adjacency', memoId, 'lists', out.size, 'targets:', Array.from(out.entries()));
   return out;
 }
 
-// MUTUAL + thresholded edge set among the ON-SCREEN neighbors ONLY. For each unordered pair
-// (A, B) of resolved neighbors, keep an edge IFF A's blob lists B AND B's blob lists A
-// (mutual — a forward-only reference is a capture-order artifact and is NOT drawn) AND the
-// qualifying score — the MIN of the two directional scores, so BOTH directions must clear the
-// bar — is >= INTER_NEIGHBOR_EDGE_THRESHOLD. Off-screen ids a blob may reference are ignored
-// because we only test ids that are themselves in the resolved set. Returns { a, b } memo_id
-// pairs; renderEgoGraph maps each id to its ring position.
-function computeMutualEdges(resolved, adjacency) {
+// UNION (directed) thresholded edge set among the ON-SCREEN neighbors ONLY. Connection blobs
+// are forward-only / write-once: a memo's blob lists the memos that existed when it was
+// captured and is never back-filled, so for any pair almost exactly ONE direction is ever
+// present and the pair is virtually never listed in both directions. We therefore draw an edge when
+// EITHER direction lists the other at >= INTER_NEIGHBOR_EDGE_THRESHOLD, using the MAX of the
+// present directional score(s) as the qualifying score. Neither direction present → no edge
+// (the two memos genuinely never listed each other). Off-screen ids a blob may reference are
+// ignored because we only test ids that are themselves in the resolved set. Returns { a, b }
+// memo_id pairs; renderEgoGraph maps each id to its ring position.
+function computeInterNeighborEdges(resolved, adjacency) {
   const edges = [];
-  console.log('[3.5-debug] resolved memo_ids =', JSON.stringify(resolved.map(x => x.memo_id)));
-  for (const [k, m] of adjacency) {
-    console.log('[3.5-debug] adjacency key', k, 'size=', m.size, 'keys=', JSON.stringify(Array.from(m.keys())));
-  }
   for (let i = 0; i < resolved.length; i++) {
     for (let j = i + 1; j < resolved.length; j++) {
       const A = resolved[i];
       const B = resolved[j];
-      const aOut = adjacency.get(A.memo_id);
-      const bOut = adjacency.get(B.memo_id);
-      if (!aOut || !bOut) continue;
-      const sAB = aOut.get(B.memo_id);
-      const sBA = bOut.get(A.memo_id);
-      console.log('[3.5-debug] pair', A.memo_id, B.memo_id, 'sAB=', sAB, 'sBA=', sBA, 'min=', (typeof sAB==='number'&&typeof sBA==='number')?Math.min(sAB,sBA):'N/A', 'threshold=', INTER_NEIGHBOR_EDGE_THRESHOLD);
-      if ((typeof sAB === 'number') !== (typeof sBA === 'number')) {
-        console.log('[3.5-debug] ASYMMETRIC pair: A=', A.memo_id, 'B=', B.memo_id, '| aOut.size=', aOut.size, 'bOut.size=', bOut.size, '| aOut.has(B)=', aOut.has(B.memo_id), 'bOut.has(A)=', bOut.has(A.memo_id));
-      }
-      if (typeof sAB !== 'number' || typeof sBA !== 'number') continue; // not mutual
-      if (Math.min(sAB, sBA) >= INTER_NEIGHBOR_EDGE_THRESHOLD) {
+      // Directional scores from each neighbor's OWN blob (either may be absent — blobs are
+      // forward-only, so a pair is almost never listed in both directions).
+      const sAB = adjacency.get(A.memo_id)?.get(B.memo_id);
+      const sBA = adjacency.get(B.memo_id)?.get(A.memo_id);
+      const present = [];
+      if (typeof sAB === 'number') present.push(sAB);
+      if (typeof sBA === 'number') present.push(sBA);
+      if (present.length === 0) continue; // neither lists the other → no edge
+      // Union: qualify on the MAX of whichever direction(s) exist.
+      if (Math.max(...present) >= INTER_NEIGHBOR_EDGE_THRESHOLD) {
         edges.push({ a: A.memo_id, b: B.memo_id });
       }
     }
   }
-  console.log('[3.5-debug] total edges:', edges.length);
   return edges;
 }
 
@@ -589,7 +585,7 @@ function showGraphError(bodyEl, text) {
 //
 // Hand-rolled inline SVG (no library, no new dependency). Single radial ring: the center
 // node in the middle, the resolved neighbors evenly spaced on one circle around it, a spoke
-// from the center to each neighbor, (3.5) thin dashed edges between mutually-related neighbors
+// from the center to each neighbor, (3.5) thin dashed edges between related neighbors (union/directed)
 // (distinct from the spokes), neighbor radius scaled by cosine score (center stays largest),
 // and a truncated label per node with the full title in an SVG <title> for hover. Styling
 // inherits the app's existing design tokens (see makeGraphPanel / the scoped <style>).
@@ -667,7 +663,7 @@ function makeGraphPanel() {
 }
 
 // Draw the ego-graph. center = { memo_id, title, score }; neighbors = resolved set
-// [{ memo_id, title, summary, score }]; edges = mutual inter-neighbor pairs [{ a, b }] of
+// [{ memo_id, title, summary, score }]; edges = inter-neighbor pairs [{ a, b }] of
 // neighbor memo_ids (3.5; may be omitted/empty). An empty neighbors array → lone center node;
 // an empty/omitted edges array → exactly the 3.4b look (spokes + nodes, no inter-edges).
 function renderEgoGraph(bodyEl, center, neighbors, edges) {
