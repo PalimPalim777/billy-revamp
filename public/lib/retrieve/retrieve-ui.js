@@ -531,6 +531,7 @@ async function fetchOneNeighborAdjacency(memoId, dek) {
   } catch (err) {
     console.warn('[retrieve] neighbor blob decrypt/parse failed, no edges for:', memoId, err);
   }
+  console.log('[3.5-debug] adjacency', memoId, 'lists', out.size, 'targets:', Array.from(out.entries()));
   return out;
 }
 
@@ -552,12 +553,14 @@ function computeMutualEdges(resolved, adjacency) {
       if (!aOut || !bOut) continue;
       const sAB = aOut.get(B.memo_id);
       const sBA = bOut.get(A.memo_id);
+      console.log('[3.5-debug] pair', A.memo_id, B.memo_id, 'sAB=', sAB, 'sBA=', sBA, 'min=', (typeof sAB==='number'&&typeof sBA==='number')?Math.min(sAB,sBA):'N/A', 'threshold=', INTER_NEIGHBOR_EDGE_THRESHOLD);
       if (typeof sAB !== 'number' || typeof sBA !== 'number') continue; // not mutual
       if (Math.min(sAB, sBA) >= INTER_NEIGHBOR_EDGE_THRESHOLD) {
         edges.push({ a: A.memo_id, b: B.memo_id });
       }
     }
   }
+  console.log('[3.5-debug] total edges:', edges.length);
   return edges;
 }
 
