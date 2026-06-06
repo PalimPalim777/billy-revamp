@@ -9,13 +9,16 @@
 // typed-query flow and a single-click PIVOT: clicking a NEIGHBOR node re-centers the graph on
 // that memo with NO LLM call and NO corpus sweep (fetch+decrypt that memo by id, redraw graph
 // + card in place, summary above left untouched). A ~240ms click/double-click disambiguator
-// reserves double-click for the 3.7 overlay. (3.6c) A display-time neighbor relevance floor
+// reserves double-click for the 3.7 overlay. (3.6b) Pivots build a breadcrumb trail above the
+// cluster; a crumb click jumps back to that memo and a return-to-origin control snaps back to the
+// typed-query center (pure client trail on top of the 3.6a pivot; no new fetch). (3.6c) A
+// display-time neighbor relevance floor
 // (NEIGHBOR_DISPLAY_THRESHOLD) drops stored neighbors below it BEFORE the top-N, so a center
 // with few strong neighbors renders fewer nodes (or a lone center) instead of padding the ring
 // with weak matches. (3.7) Double-clicking any node (center or neighbor) opens that memo's FULL
 // synthesized text in a modal overlay over the cluster (already-decrypted in-session data — NO
-// fetch, NO LLM); closing it restores the exact graph state. NO pass-through dots (deferred), NO
-// breadcrumbs/origin/return-to-origin (3.6b), NO mobile tuning (3.8).
+// fetch, NO LLM); closing it restores the exact graph state. NO pass-through dots (deferred),
+// NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
 // streaming summary calls api.anthropic.com directly with the user's own key (capture
@@ -103,6 +106,17 @@ export function mountRetrieve(container) {
 
   let inFlight = false;
 
+  // ---- 3.6b breadcrumb / return-to-origin state (per-current-cluster) ----
+  // retrieve is single-live-cluster: submit() does result.innerHTML='' on every typed query, so
+  // exploration state belongs to exactly one cluster — a new query resets origin + trail; there is
+  // no scrollback and no per-message keying. Trail invariant: trail[last].memo_id is ALWAYS the
+  // current graph center and trail[0] is the origin. trail[0].memo holds the already-decrypted
+  // typed-query center memo (WITH its cosineScore) so returning to origin re-renders it identically
+  // (badge shown, no center re-fetch); pivot crumbs carry memo:null and are re-fetched on demand.
+  let trail = [];           // array of { memo_id, title, memo }; current center = trail[last]
+  let breadcrumbsEl = null; // the .retrieve-breadcrumbs container for the current cluster
+  let navBusy = false;      // serialize guard for pivot/crumb re-centers
+
   function setBusy(b) {
     inFlight = b;
     searchBtn.disabled = b;
@@ -165,6 +179,115 @@ export function mountRetrieve(container) {
     }
 
     return card;
+  }
+
+  // ---- 3.6b breadcrumb trail UI (labels via textContent ONLY — a hostile title must never
+  // inject markup) ----
+
+  // The breadcrumb row container; the caller mounts it BETWEEN the summary and the graph so it
+  // survives every pivot (renderEgoGraphForCenter removes ONLY .retrieve-graph + .memo-card).
+  function buildBreadcrumbsRegion() {
+    const el = document.createElement('div');
+    el.className = 'retrieve-breadcrumbs';
+    el.style.display = 'flex';
+    el.style.flexWrap = 'wrap';
+    el.style.alignItems = 'center';
+    el.style.gap = '6px';
+    el.style.margin = '0 0 12px';
+    return el;
+  }
+
+  // Render the trail into breadcrumbsEl. Hidden at depth ≤ 1 (no lone Origin chip on a fresh query
+  // or right after returning to origin). Past crumbs are clickable pills that jump back; the last
+  // crumb is the current center (bold, NOT a button); a trailing "Return to origin" text-button is
+  // the explicit affordance. Chips disable while navBusy so a re-center can't be double-fired.
+  function renderBreadcrumbs() {
+    if (breadcrumbsEl === null) return;
+    breadcrumbsEl.innerHTML = '';
+    if (trail.length <= 1) {
+      breadcrumbsEl.style.display = 'none';
+      return;
+    }
+    breadcrumbsEl.style.display = 'flex';
+
+    const last = trail.length - 1;
+    for (let i = 0; i <= last; i++) {
+      // Muted separator BETWEEN consecutive crumbs.
+      if (i > 0) {
+        const sep = document.createElement('span');
+        sep.textContent = '›';
+        sep.style.color = C_MUTED;
+        sep.style.fontSize = '12px';
+        sep.style.pointerEvents = 'none';
+        breadcrumbsEl.appendChild(sep);
+      }
+      if (i < last) {
+        // Past crumb → clickable pill that jumps back to that memo.
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = truncateLabel(trail[i].title, 18);
+        btn.style.border = `1px solid ${C_SPOKE}`;
+        btn.style.background = C_NODE_FILL;
+        btn.style.color = C_INK_BODY;
+        btn.style.borderRadius = '999px';
+        btn.style.padding = '2px 10px';
+        btn.style.fontSize = '12px';
+        btn.style.cursor = 'pointer';
+        btn.disabled = navBusy;
+        btn.style.opacity = navBusy ? '0.5' : '1';
+        btn.addEventListener('click', () => goToIndex(i));
+        breadcrumbsEl.appendChild(btn);
+      } else {
+        // Current center → NON-clickable bold label.
+        const cur = document.createElement('span');
+        cur.textContent = truncateLabel(trail[i].title, 18);
+        cur.style.fontWeight = '600';
+        cur.style.color = C_INK;
+        breadcrumbsEl.appendChild(cur);
+      }
+    }
+
+    // Explicit "Return to origin" affordance (the i=0 crumb does this too). Light text-button.
+    const ret = document.createElement('button');
+    ret.type = 'button';
+    ret.textContent = 'Return to origin';
+    ret.style.background = 'transparent';
+    ret.style.border = 'none';
+    ret.style.color = C_MUTED;
+    ret.style.fontSize = '12px';
+    ret.style.cursor = 'pointer';
+    ret.style.padding = '2px 6px';
+    ret.disabled = navBusy;
+    ret.addEventListener('click', () => goToIndex(0));
+    breadcrumbsEl.appendChild(ret);
+  }
+
+  // ---- 3.6b navigation: pivot deeper / jump back (BOTH reuse renderEgoGraphForCenter and add NO
+  // network beyond what it already does) ----
+
+  // Neighbor-click target: push a new crumb, then re-center on it (3.6a pivot fetch by id).
+  async function pivotTo(memoId, title) {
+    if (navBusy) return;
+    navBusy = true;
+    trail.push({ memo_id: memoId, title: title || '(untitled)', memo: null });
+    renderBreadcrumbs();                              // new depth; chips disabled while navBusy
+    try { await renderEgoGraphForCenter(memoId); }    // memo omitted → 3.6a pivot fetch
+    finally { navBusy = false; renderBreadcrumbs(); } // re-enable chips
+  }
+
+  // Crumb / return-to-origin target: truncate the trail to i, then re-center on trail[i].
+  async function goToIndex(i) {
+    if (navBusy) return;
+    if (i < 0 || i >= trail.length) return;
+    if (i === trail.length - 1) return;               // already current → no-op
+    navBusy = true;
+    trail = trail.slice(0, i + 1);                    // drop everything after i
+    renderBreadcrumbs();
+    const entry = trail[i];
+    // Origin (i=0) carries its decrypted memo → preserves the badge and skips a center re-fetch;
+    // a pivot crumb carries memo:null → renderEgoGraphForCenter fetches it by id.
+    try { await renderEgoGraphForCenter(entry.memo_id, entry.memo); }
+    finally { navBusy = false; renderBreadcrumbs(); }
   }
 
   // ---- 3.6a shared center renderer (typed-query render path AND single-click pivot) ----
@@ -234,10 +357,10 @@ export function mountRetrieve(container) {
     if (!dek) dek = await getSessionDEK();
     if (!dek) { showGraphError(graphBody, 'Your session is locked — re-unlock to load neighbors.'); return; }
 
-    // Neighbor data layer + ego-graph render (self-contained; never throws). The onPivot
-    // callback lets a single-click on any NEIGHBOR re-center on it — centerMemo omitted so this
-    // very function fetches that memo by id (the pivot path above).
-    await loadAndRenderNeighbors(centerMemoId, centerMemo, score, dek, graphBody, (memoId) => renderEgoGraphForCenter(memoId));
+    // Neighbor data layer + ego-graph render (self-contained; never throws). (3.6b) The onPivot
+    // callback routes a NEIGHBOR single-click through pivotTo, which pushes a breadcrumb and then
+    // re-enters this renderer (memo omitted → the 3.6a pivot fetch-by-id path above).
+    await loadAndRenderNeighbors(centerMemoId, centerMemo, score, dek, graphBody, (memoId, title) => pivotTo(memoId, title));
   }
 
   async function submit() {
@@ -256,6 +379,9 @@ export function mountRetrieve(container) {
     // (3.7) Per-query reset: a new query starts a fresh cluster, so close any stray full-memo
     // overlay (and detach its Escape listener) so it can't survive into the new query.
     closeAnyMemoOverlay();
+    // (3.6b) New cluster = fresh breadcrumb state (a failed query then leaves no stale trail;
+    // result.innerHTML clears its DOM on the success path anyway).
+    trail = []; breadcrumbsEl = null; navBusy = false;
 
     try {
       // The DEK decrypts both corpus embeddings and the center's content.
@@ -332,6 +458,16 @@ export function mountRetrieve(container) {
       // Carry the winning cosine score on the (already-decrypted) center memo so the shared
       // renderer can surface it on the card + center node. A 3.6a pivot has no score → omitted.
       memo.cosineScore = center.score;
+
+      // (3.6b) Origin = trail[0]: keep the decrypted typed-query center memo (with cosineScore) so
+      // returning to origin re-renders it identically — badge shown, no re-fetch. Mount the
+      // breadcrumb row BETWEEN the summary and the graph; renderEgoGraphForCenter removes only the
+      // graph + card, so the row survives every pivot/crumb. Hidden at depth 1. Final DOM order:
+      // summary → breadcrumbs → graph → card.
+      trail = [{ memo_id: center.memo_id, title: memo.title || '(untitled)', memo }];
+      breadcrumbsEl = buildBreadcrumbsRegion();
+      result.appendChild(breadcrumbsEl);
+      renderBreadcrumbs();
 
       // Run the summary stream and the graph + card render in parallel. Both are
       // self-contained: each catches internally and resolves (never rejects), so
@@ -1001,8 +1137,8 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot) {
         }
         pendingClickTimer = setTimeout(() => {
           pendingClickTimer = null;
-          // centerMemo omitted → renderEgoGraphForCenter fetches + decrypts this memo by id.
-          onPivot(neighborMemoId);
+          // (3.6b) onPivot(memoId, title) → pivotTo: push a crumb, then re-center (3.6a fetch by id).
+          onPivot(neighborMemoId, p.n.title);
         }, CLICK_DISAMBIG_MS);
       });
       g.addEventListener('dblclick', () => {
