@@ -1,4 +1,4 @@
-// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor) —
+// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay) —
 // typed-query sweep + single-center selection (3.2c), a CENTER-ONLY streaming written summary
 // ABOVE (3.3), and the ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
@@ -12,8 +12,10 @@
 // reserves double-click for the 3.7 overlay. (3.6c) A display-time neighbor relevance floor
 // (NEIGHBOR_DISPLAY_THRESHOLD) drops stored neighbors below it BEFORE the top-N, so a center
 // with few strong neighbors renders fewer nodes (or a lone center) instead of padding the ring
-// with weak matches. NO pass-through dots (deferred), NO breadcrumbs/
-// origin/return-to-origin (3.6b), NO double-click overlay yet (3.7), NO mobile tuning (3.8).
+// with weak matches. (3.7) Double-clicking any node (center or neighbor) opens that memo's FULL
+// synthesized text in a modal overlay over the cluster (already-decrypted in-session data — NO
+// fetch, NO LLM); closing it restores the exact graph state. NO pass-through dots (deferred), NO
+// breadcrumbs/origin/return-to-origin (3.6b), NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
 // streaming summary calls api.anthropic.com directly with the user's own key (capture
@@ -251,6 +253,10 @@ export function mountRetrieve(container) {
     setBusy(true);
     showMessage('Searching your memos…', false);
 
+    // (3.7) Per-query reset: a new query starts a fresh cluster, so close any stray full-memo
+    // overlay (and detach its Escape listener) so it can't survive into the new query.
+    closeAnyMemoOverlay();
+
     try {
       // The DEK decrypts both corpus embeddings and the center's content.
       const dek = await getSessionDEK();
@@ -465,7 +471,7 @@ function buildGraphRegion() {
 //   onPivot     — (3.6a) callback(neighborMemoId) a NEIGHBOR single-click invokes to re-center
 //                 the graph on that neighbor; threaded straight through to renderEgoGraph.
 async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bodyEl, onPivot) {
-  const center = { memo_id: centerId, title: (centerMemo && centerMemo.title) || '(untitled)', score: centerScore };
+  const center = { memo_id: centerId, title: (centerMemo && centerMemo.title) || '(untitled)', score: centerScore, memo: centerMemo };
   try {
     // 1) GET the center's blob (ciphertext-only sibling of the content endpoint).
     const r = await fetch(`/api/memos/${encodeURIComponent(centerId)}/connection-blob`, {
@@ -550,7 +556,8 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
           memo_id: n.memo_id,
           title: (neighborMemo && neighborMemo.title) || '(untitled)',
           summary: (neighborMemo && neighborMemo.summary) || '',
-          score: typeof n.score === 'number' ? n.score : 0
+          score: typeof n.score === 'number' ? n.score : 0,
+          memo: neighborMemo
         });
       } catch (err) {
         console.warn('[retrieve] neighbor decrypt/parse failed, skipping:', n.memo_id, err);
@@ -679,6 +686,130 @@ function showGraphError(bodyEl, text) {
   p.textContent = text;
   panel.appendChild(p);
   bodyEl.appendChild(panel);
+}
+
+// ---- 3.7 full-memo overlay (double-click a node → modal over the cluster) ----
+//
+// Opens the FULL synthesized memo (already decrypted in-session — NO fetch, NO LLM) in a singleton
+// modal over the cluster; closing it returns to the exact same graph state (the cluster DOM is
+// never touched). Reuses the .memo-card frame + existing design tokens. Every field renders via
+// textContent ONLY — a hostile title/body/tag can never inject markup.
+
+// Build the backdrop + card for `memo`; returns the backdrop element (not yet attached).
+function buildMemoOverlay(memo) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'retrieve-memo-overlay';
+  backdrop.setAttribute('role', 'dialog');
+  backdrop.setAttribute('aria-modal', 'true');
+  backdrop.setAttribute('aria-label', memo.title || 'Memo');
+  backdrop.style.position = 'fixed';
+  backdrop.style.inset = '0';
+  backdrop.style.background = 'rgba(0,0,0,0.45)';
+  backdrop.style.display = 'flex';
+  backdrop.style.alignItems = 'center';
+  backdrop.style.justifyContent = 'center';
+  backdrop.style.zIndex = '1000';
+  backdrop.style.padding = '16px'; // card never touches the screen edge on mobile
+
+  const card = document.createElement('div');
+  card.className = 'memo-card';
+  card.style.position = 'relative';
+  card.style.width = '100%';
+  card.style.maxWidth = '560px';
+  card.style.maxHeight = '82vh';
+  card.style.overflowY = 'auto';
+  card.style.textAlign = 'left';
+  card.style.background = C_NODE_FILL;
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.textContent = '×';
+  closeBtn.setAttribute('aria-label', 'Close');
+  closeBtn.style.position = 'absolute';
+  closeBtn.style.top = '8px';
+  closeBtn.style.right = '12px';
+  closeBtn.style.background = 'transparent';
+  closeBtn.style.border = 'none';
+  closeBtn.style.fontSize = '22px';
+  closeBtn.style.lineHeight = '1';
+  closeBtn.style.cursor = 'pointer';
+  closeBtn.style.color = C_MUTED;
+  closeBtn.addEventListener('click', () => closeMemoOverlay(backdrop));
+
+  // Fields, in order, each via textContent; skip any absent field.
+  const h = document.createElement('h3');
+  h.textContent = memo.title || '(untitled)';
+  card.appendChild(h);
+
+  if (memo.para_bucket) {
+    const bucket = document.createElement('span');
+    bucket.className = 'bucket';
+    bucket.textContent = memo.para_bucket;
+    card.appendChild(bucket);
+  }
+
+  if (memo.time_reference) {
+    const when = document.createElement('p');
+    when.className = 'small';
+    when.style.color = C_MUTED;
+    when.textContent = `When: ${memo.time_reference}`;
+    card.appendChild(when);
+  }
+
+  if (memo.summary) {
+    const summary = document.createElement('div');
+    summary.className = 'memo-summary';
+    summary.textContent = memo.summary;
+    card.appendChild(summary);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'memo-body';
+  body.style.whiteSpace = 'pre-wrap'; // preserve paragraph breaks in the body
+  body.textContent = memo.body || '';
+  card.appendChild(body);
+
+  if (Array.isArray(memo.tags) && memo.tags.length) {
+    const tags = document.createElement('div');
+    tags.className = 'memo-tags';
+    tags.textContent = memo.tags.join(' · '); // visible here (spec 4.3), NOT clickable
+    card.appendChild(tags);
+  }
+
+  backdrop._closeBtn = closeBtn; // stash for initial focus
+  card.appendChild(closeBtn);
+  backdrop.appendChild(card);
+  return backdrop;
+}
+
+// Open `memo` in the singleton overlay (no-op if memo is falsy). Backdrop click + Escape + the ×
+// button all close; clicks inside the card do not. Initial focus lands on the × control.
+function openMemoOverlay(memo) {
+  if (!memo) return;
+  closeAnyMemoOverlay(); // singleton: only one open at a time
+  const backdrop = buildMemoOverlay(memo);
+  backdrop.addEventListener('click', (e) => {
+    // Backdrop click closes; clicks inside the card do not (they don't hit the backdrop itself).
+    if (e.target === backdrop) closeMemoOverlay(backdrop);
+  });
+  const esc = (e) => { if (e.key === 'Escape') closeMemoOverlay(backdrop); };
+  backdrop._esc = esc;
+  document.addEventListener('keydown', esc);
+  document.body.appendChild(backdrop);
+  if (backdrop._closeBtn) backdrop._closeBtn.focus();
+}
+
+// Close a specific overlay: detach its Escape listener, then remove it from the DOM.
+function closeMemoOverlay(backdrop) {
+  if (!backdrop) return;
+  if (backdrop._esc) document.removeEventListener('keydown', backdrop._esc);
+  backdrop.remove();
+}
+
+// Close whatever overlay is currently open (singleton), if any.
+function closeAnyMemoOverlay() {
+  const el = document.querySelector('.retrieve-memo-overlay');
+  if (el) closeMemoOverlay(el);
 }
 
 // ---- 3.4b ego-graph SVG render ----
@@ -875,11 +1006,14 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot) {
         }, CLICK_DISAMBIG_MS);
       });
       g.addEventListener('dblclick', () => {
+        // Keep the 3.6a guard: cancel the pending single-click pivot so it never fires under the
+        // overlay (the 240ms disambiguator + single-click pivot are otherwise unchanged).
         if (pendingClickTimer !== null) {
           clearTimeout(pendingClickTimer);
           pendingClickTimer = null;
         }
-        // 3.7 PLACEHOLDER: full-memo overlay goes here. NO-OP in 3.6a. Leave this comment.
+        // (3.7) Open the FULL memo (already in hand on the node) over the cluster.
+        if (p.n.memo) openMemoOverlay(p.n.memo);
       });
     }
 
@@ -931,6 +1065,9 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot) {
   });
   cLabel.textContent = truncateLabel(center.title, LABEL_TRUNCATE_CENTER / 2); // fits inside node
   cg.appendChild(cLabel);
+  // (3.7) Double-click the center to open its FULL memo (already in hand). The center has no
+  // single-click/pivot handler, so no disambiguator dance is needed.
+  cg.addEventListener('dblclick', () => { if (center.memo) openMemoOverlay(center.memo); });
   svg.appendChild(cg);
 
   panel.appendChild(svg);
