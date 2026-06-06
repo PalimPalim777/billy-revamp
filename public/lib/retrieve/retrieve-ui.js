@@ -1,4 +1,4 @@
-// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot) —
+// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor) —
 // typed-query sweep + single-center selection (3.2c), a CENTER-ONLY streaming written summary
 // ABOVE (3.3), and the ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
@@ -9,7 +9,10 @@
 // typed-query flow and a single-click PIVOT: clicking a NEIGHBOR node re-centers the graph on
 // that memo with NO LLM call and NO corpus sweep (fetch+decrypt that memo by id, redraw graph
 // + card in place, summary above left untouched). A ~240ms click/double-click disambiguator
-// reserves double-click for the 3.7 overlay. NO pass-through dots (deferred), NO breadcrumbs/
+// reserves double-click for the 3.7 overlay. (3.6c) A display-time neighbor relevance floor
+// (NEIGHBOR_DISPLAY_THRESHOLD) drops stored neighbors below it BEFORE the top-N, so a center
+// with few strong neighbors renders fewer nodes (or a lone center) instead of padding the ring
+// with weak matches. NO pass-through dots (deferred), NO breadcrumbs/
 // origin/return-to-origin (3.6b), NO double-click overlay yet (3.7), NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
@@ -29,6 +32,16 @@ const SWEEP_PAGE_SIZE = 200;
 // The center blob can hold up to 20 neighbors (K_NEIGHBORS in embeddings.js). The ego-graph
 // draws only the top 8 by score, to keep the ring (and its inter-neighbor edges) legible.
 const NEIGHBOR_DISPLAY_COUNT = 8;
+
+// 3.6c neighbor MEMBERSHIP floor: a stored neighbor is only drawn as a node when its
+// connection score to the center is >= this. Distinct from (and lower than) the 0.6
+// inter-neighbor EDGE threshold: a spoke is a weaker bar than an extra inter-neighbor edge.
+// Below the floor the neighbor is dropped entirely — the graph renders fewer than
+// NEIGHBOR_DISPLAY_COUNT nodes (possibly a lone center) rather than padding with weak
+// matches (spec section 12 "never pad with weak matches" / 5.1 "sparse-and-meaningful over
+// dense-and-noisy"). STRAWMAN value — bge-small-and-corpus-dependent, the second parameter
+// to calibrate during dogfooding after the edge threshold; err toward dropping too many.
+const NEIGHBOR_DISPLAY_THRESHOLD = 0.5;
 
 // 3.5 inter-neighbor edges: draw a neighbor↔neighbor edge when EITHER of the two visible
 // neighbors lists the other in its own blob (union/directed — connection blobs are forward-only
@@ -501,6 +514,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     // connect pass; we only display NEIGHBOR_DISPLAY_COUNT here.
     const top = allNeighbors
       .slice()
+      .filter(n => (typeof n.score === 'number' ? n.score : 0) >= NEIGHBOR_DISPLAY_THRESHOLD)
       .sort((a, b) => (b.score || 0) - (a.score || 0))
       .slice(0, NEIGHBOR_DISPLAY_COUNT);
 
