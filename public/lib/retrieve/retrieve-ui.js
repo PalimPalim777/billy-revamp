@@ -1,4 +1,4 @@
-// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay) —
+// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay + 3.8a sparse caption) —
 // typed-query sweep + single-center selection (3.2c), a CENTER-ONLY streaming written summary
 // ABOVE (3.3), and the ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
@@ -17,8 +17,9 @@
 // with few strong neighbors renders fewer nodes (or a lone center) instead of padding the ring
 // with weak matches. (3.7) Double-clicking any node (center or neighbor) opens that memo's FULL
 // synthesized text in a modal overlay over the cluster (already-decrypted in-session data — NO
-// fetch, NO LLM); closing it restores the exact graph state. NO pass-through dots (deferred),
-// NO mobile tuning (3.8).
+// fetch, NO LLM); closing it restores the exact graph state. (3.8a) A lone-center cluster shows an
+// honest caption for WHY it is empty (no connections yet / nothing closely related yet / related
+// notes couldn't be loaded). NO pass-through dots (deferred), NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
 // streaming summary calls api.anthropic.com directly with the user's own key (capture
@@ -623,7 +624,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     // memo, or one whose connect pass never finished). Draw the center node ALONE — an
     // honest "no connections yet" graph, distinct from a fetch error. No crash, no ring.
     if (blobResponse.connection_blob_ciphertext == null || blobResponse.connection_blob_iv == null) {
-      renderEgoGraph(bodyEl, center, [], [], onPivot);
+      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected');
       return;
     }
 
@@ -648,7 +649,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     const allNeighbors = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
     if (allNeighbors.length === 0) {
       // The connect pass ran but produced an empty set (e.g. first memo). Lone center node.
-      renderEgoGraph(bodyEl, center, [], [], onPivot);
+      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected');
       return;
     }
 
@@ -716,7 +717,14 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     // neighbor was unfetchable (resolved empty but the blob had neighbors), renderEgoGraph
     // falls back to the lone center node — honest, no crash, no empty ring. No qualifying
     // edges → exactly the 3.4b look (spokes + nodes, no inter-edges).
-    renderEgoGraph(bodyEl, center, resolved, edges, onPivot);
+    // (3.8a) Lone-center reason for the honest caption: every stored neighbor fell below the 3.6c
+    // display floor ('below-floor') vs above-floor neighbors existed but all failed to fetch/decrypt
+    // ('unresolved'). Stays null when a ring renders (resolved non-empty) → caption block never runs.
+    let emptyReason = null;
+    if (resolved.length === 0) {
+      emptyReason = (top.length === 0) ? 'below-floor' : 'unresolved';
+    }
+    renderEgoGraph(bodyEl, center, resolved, edges, onPivot, emptyReason);
   } catch (err) {
     // Unhandled network/runtime error before any per-neighbor work. Show an inline
     // error; the card + summary above are unaffected.
@@ -1033,6 +1041,18 @@ function makeGraphPanel() {
   return panel;
 }
 
+// (3.8a) Honest sparse-cluster captions. A lone center (no ring) has three distinct causes; the
+// caller in loadAndRenderNeighbors knows which and threads the reason to renderEgoGraph. Calm,
+// non-alarming wording. (Network/decrypt failures are NOT here — those use showGraphError.)
+const EGO_EMPTY_CAPTIONS = {
+  unconnected: 'no connections yet',
+  'below-floor': 'nothing closely related yet',
+  unresolved: "related notes couldn't be loaded",
+};
+function egoEmptyCaption(reason) {
+  return EGO_EMPTY_CAPTIONS[reason] || EGO_EMPTY_CAPTIONS.unconnected;
+}
+
 // Draw the ego-graph. center = { memo_id, title, score }; neighbors = resolved set
 // [{ memo_id, title, summary, score }]; edges = inter-neighbor pairs [{ a, b }] of
 // neighbor memo_ids (3.5; may be omitted/empty). An empty neighbors array → lone center node;
@@ -1040,7 +1060,9 @@ function makeGraphPanel() {
 // (3.6a) onPivot(neighborMemoId) — invoked by a NEIGHBOR single-click to re-center the graph
 // on that neighbor; the center node is NOT wired. center.score may be null for a pivot center
 // (no sweep) → its hover then shows the title alone (no "best match · cosine …").
-function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot) {
+// (3.8a) emptyReason — when neighbors is empty (lone center), selects the honest caption via
+// egoEmptyCaption ('unconnected' | 'below-floor' | 'unresolved'); ignored when a ring renders.
+function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason = null) {
   bodyEl.innerHTML = '';
   const panel = makeGraphPanel();
 
@@ -1214,7 +1236,7 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot) {
     note.className = 'small';
     note.style.margin = '6px 0 0';
     note.style.color = C_MUTED;
-    note.textContent = 'no connections yet';
+    note.textContent = egoEmptyCaption(emptyReason);
     panel.appendChild(note);
   }
 
