@@ -1,4 +1,4 @@
-// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay + 3.8a sparse caption) —
+// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay + 3.8a sparse caption + 3.8b disambig hoist) —
 // typed-query sweep + single-center selection (3.2c), a CENTER-ONLY streaming written summary
 // ABOVE (3.3), and the ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
@@ -19,7 +19,10 @@
 // synthesized text in a modal overlay over the cluster (already-decrypted in-session data — NO
 // fetch, NO LLM); closing it restores the exact graph state. (3.8a) A lone-center cluster shows an
 // honest caption for WHY it is empty (no connections yet / nothing closely related yet / related
-// notes couldn't be loaded). NO pass-through dots (deferred), NO mobile tuning (3.8).
+// notes couldn't be loaded). (3.8b) The click/double-click disambiguation timer is module-scoped
+// and cancellable, so any re-center (pivot/crumb/return/typed query) pre-empts a stale single-click
+// pivot; its window widened 240→350ms to cut slow-double-click misfires. NO pass-through dots
+// (deferred), NO mobile tuning (3.8).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
 // streaming summary calls api.anthropic.com directly with the user's own key (capture
@@ -309,6 +312,7 @@ export function mountRetrieve(container) {
   //                  + JSON.parse path the neighbor loop uses (no new decrypt helper), and it has
   //                  no cosine score → the card + center node omit the "best match" line.
   async function renderEgoGraphForCenter(centerMemoId, centerMemo = null) {
+    cancelPendingPivot(); // (3.8b) any re-center (pivot/crumb/return/typed) pre-empts a pending single-click pivot
     const isPivot = (centerMemo == null);
 
     // Replace the prior cluster (graph + center card) so a pivot re-centers in place. The
@@ -383,6 +387,7 @@ export function mountRetrieve(container) {
     // (3.6b) New cluster = fresh breadcrumb state (a failed query then leaves no stale trail;
     // result.innerHTML clears its DOM on the success path anyway).
     trail = []; breadcrumbsEl = null; navBusy = false;
+    cancelPendingPivot(); // (3.8b) a new query cancels any pending pivot before the async sweep (closes race B)
 
     try {
       // The DEK decrypts both corpus embeddings and the center's content.
@@ -1000,7 +1005,18 @@ const INTER_EDGE_DASH = '5 4';   // dashed (vs solid spokes)
 
 // 3.6a click/double-click disambiguation window (ms). A single-click pivot waits this long
 // before firing so a double-click — reserved for the 3.7 full-memo overlay — can pre-empt it.
-const CLICK_DISAMBIG_MS = 240;
+// (3.8b) Widened 240 → 350: 240 sat below typical OS double-click thresholds, so a slow double
+// click could misfire the single-click pivot before the 2nd click landed.
+const CLICK_DISAMBIG_MS = 350;
+
+// (3.8b) Module-scoped so any re-center path can cancel a still-pending single-click pivot
+// (the timer is armed inside renderEgoGraph but a re-render replaces that function's scope;
+// a shared handle lets renderEgoGraphForCenter + submit cancel a stale timer). Only one
+// retrieve is mounted per page (app.html guards), so module-level transient state is safe.
+let pendingClickTimer = null;
+function cancelPendingPivot() {
+  if (pendingClickTimer !== null) { clearTimeout(pendingClickTimer); pendingClickTimer = null; }
+}
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS(SVG_NS, tag);
@@ -1135,9 +1151,8 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
   }
 
   // ---- neighbor nodes (on top of spokes) ----
-  // One disambiguation timer shared across this render's neighbor nodes (the user clicks one
-  // node at a time): a single-click arms it; the 2nd click of a double-click cancels it. (3.6a)
-  let pendingClickTimer = null;
+  // (3.8b) The single-click disambiguation timer is now MODULE-scoped (pendingClickTimer /
+  // cancelPendingPivot) so a re-render can't strand it; the handlers below reference it by name.
   const scoreToRadius = count ? makeScoreToRadius(neighbors) : null;
   for (const p of positions) {
     const r = scoreToRadius(typeof p.n.score === 'number' ? p.n.score : 0);
