@@ -1,4 +1,4 @@
-// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay + 3.8a sparse caption + 3.8b disambig hoist) —
+// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay + 3.8a sparse caption + 3.8b disambig hoist + 3.8c mobile profile) —
 // typed-query sweep + single-center selection (3.2c), a CENTER-ONLY streaming written summary
 // ABOVE (3.3), and the ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
@@ -21,8 +21,11 @@
 // honest caption for WHY it is empty (no connections yet / nothing closely related yet / related
 // notes couldn't be loaded). (3.8b) The click/double-click disambiguation timer is module-scoped
 // and cancellable, so any re-center (pivot/crumb/return/typed query) pre-empts a stale single-click
-// pivot; its window widened 240→350ms to cut slow-double-click misfires. NO pass-through dots
-// (deferred), NO mobile tuning (3.8).
+// pivot; its window widened 240→350ms to cut slow-double-click misfires. (3.8c) On narrow
+// viewports (≤600px, a matchMedia breakpoint — NOT device detection) the graph uses a mobile
+// geometry profile: ≤5 larger nodes on a tighter ring with longer inline labels, and
+// touch-action:manipulation disables double-tap-zoom; desktop output is byte-identical. NO
+// pass-through dots (deferred).
 // Reuses capture/connection primitives by import; NO crypto/embedding/scoring logic is
 // reimplemented here. The query is embedded LOCALLY and is never sent to our server. The
 // streaming summary calls api.anthropic.com directly with the user's own key (capture
@@ -314,6 +317,8 @@ export function mountRetrieve(container) {
   async function renderEgoGraphForCenter(centerMemoId, centerMemo = null) {
     cancelPendingPivot(); // (3.8b) any re-center (pivot/crumb/return/typed) pre-empts a pending single-click pivot
     const isPivot = (centerMemo == null);
+    // (3.8c) One viewport snapshot per render drives BOTH the fetch count and the geometry.
+    const profile = graphProfile();
 
     // Replace the prior cluster (graph + center card) so a pivot re-centers in place. The
     // summary ABOVE (.retrieve-summary) is intentionally NOT matched here → it stays visible
@@ -365,7 +370,7 @@ export function mountRetrieve(container) {
     // Neighbor data layer + ego-graph render (self-contained; never throws). (3.6b) The onPivot
     // callback routes a NEIGHBOR single-click through pivotTo, which pushes a breadcrumb and then
     // re-enters this renderer (memo omitted → the 3.6a pivot fetch-by-id path above).
-    await loadAndRenderNeighbors(centerMemoId, centerMemo, score, dek, graphBody, (memoId, title) => pivotTo(memoId, title));
+    await loadAndRenderNeighbors(centerMemoId, centerMemo, score, dek, graphBody, (memoId, title) => pivotTo(memoId, title), profile);
   }
 
   async function submit() {
@@ -612,7 +617,9 @@ function buildGraphRegion() {
 //                 3.6a pivot center (no sweep → no score; the hover then shows the title only).
 //   onPivot     — (3.6a) callback(neighborMemoId) a NEIGHBOR single-click invokes to re-center
 //                 the graph on that neighbor; threaded straight through to renderEgoGraph.
-async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bodyEl, onPivot) {
+//   profile     — (3.8c) the per-render geometry profile (desktop/mobile); caps the neighbor
+//                 slice (profile.neighborCount) and is threaded straight to renderEgoGraph.
+async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bodyEl, onPivot, profile) {
   const center = { memo_id: centerId, title: (centerMemo && centerMemo.title) || '(untitled)', score: centerScore, memo: centerMemo };
   try {
     // 1) GET the center's blob (ciphertext-only sibling of the content endpoint).
@@ -629,7 +636,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     // memo, or one whose connect pass never finished). Draw the center node ALONE — an
     // honest "no connections yet" graph, distinct from a fetch error. No crash, no ring.
     if (blobResponse.connection_blob_ciphertext == null || blobResponse.connection_blob_iv == null) {
-      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected');
+      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected', profile);
       return;
     }
 
@@ -654,17 +661,18 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     const allNeighbors = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
     if (allNeighbors.length === 0) {
       // The connect pass ran but produced an empty set (e.g. first memo). Lone center node.
-      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected');
+      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected', profile);
       return;
     }
 
-    // 4) Top-N by score, descending. The blob holds up to K_NEIGHBORS (20) from the
-    // connect pass; we only display NEIGHBOR_DISPLAY_COUNT here.
+    // 4) Top-N by score, descending. The blob holds up to K_NEIGHBORS (20) from the connect
+    // pass; we display only profile.neighborCount here (3.8c: desktop = NEIGHBOR_DISPLAY_COUNT,
+    // mobile fewer), so a mobile render also fetches fewer neighbors in the loop below.
     const top = allNeighbors
       .slice()
       .filter(n => (typeof n.score === 'number' ? n.score : 0) >= NEIGHBOR_DISPLAY_THRESHOLD)
       .sort((a, b) => (b.score || 0) - (a.score || 0))
-      .slice(0, NEIGHBOR_DISPLAY_COUNT);
+      .slice(0, profile.neighborCount);
 
     // 5) N-fetch each neighbor's content via the EXISTING ciphertext-only endpoint.
     // Documented forward-only / asymmetric-staleness tolerance: a neighbor that has since
@@ -729,7 +737,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     if (resolved.length === 0) {
       emptyReason = (top.length === 0) ? 'below-floor' : 'unresolved';
     }
-    renderEgoGraph(bodyEl, center, resolved, edges, onPivot, emptyReason);
+    renderEgoGraph(bodyEl, center, resolved, edges, onPivot, emptyReason, profile);
   } catch (err) {
     // Unhandled network/runtime error before any per-neighbor work. Show an inline
     // error; the card + summary above are unaffected.
@@ -988,6 +996,31 @@ const NEIGHBOR_R_MAX = 34;       // strongest-scoring neighbor (< CENTER_NODE_R)
 const LABEL_TRUNCATE_NEIGHBOR = 16;
 const LABEL_TRUNCATE_CENTER = 22;
 
+// (3.8c) Geometry profiles. Desktop = the existing constants (byte-identical). Mobile =
+// fewer/larger nodes, tighter ring, longer labels. Selected per-render by viewport width
+// (breakpoint, NOT device detection). STRAWMAN mobile values — tune during verification.
+const GRAPH_MOBILE_MAX_WIDTH = 600; // px; <= this picks the mobile profile
+const GRAPH_PROFILE_DESKTOP = {
+  vbW: GRAPH_VB_W, vbH: GRAPH_VB_H, cx: GRAPH_CX, cy: GRAPH_CY,
+  ringR: GRAPH_RING_R, centerR: CENTER_NODE_R,
+  nMin: NEIGHBOR_R_MIN, nMax: NEIGHBOR_R_MAX,
+  labelN: LABEL_TRUNCATE_NEIGHBOR, labelC: LABEL_TRUNCATE_CENTER,
+  neighborCount: NEIGHBOR_DISPLAY_COUNT,
+};
+const GRAPH_PROFILE_MOBILE = {
+  vbW: 400, vbH: 440, cx: 200, cy: 220,
+  ringR: 132, centerR: 44,
+  nMin: 22, nMax: 38,
+  labelN: 22, labelC: 20,
+  neighborCount: 5,
+};
+// Single viewport snapshot per render. Guard matchMedia for non-browser/test contexts.
+function graphProfile() {
+  const isMobile = (typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    && window.matchMedia(`(max-width: ${GRAPH_MOBILE_MAX_WIDTH}px)`).matches);
+  return isMobile ? GRAPH_PROFILE_MOBILE : GRAPH_PROFILE_DESKTOP;
+}
+
 // Design-token palette (lifted from public/app.html so the graph reads as part of the app).
 const C_INK = '#111';            // center node fill / primary ink (brand dark, = button)
 const C_INK_BODY = '#222';       // label ink
@@ -1035,16 +1068,16 @@ function truncateLabel(s, n) {
 // Map a neighbor's score → radius. Normalize against THIS set's own min/max so size
 // differences are visible even when cosine scores cluster. Divide-by-zero-safe: if every
 // score is equal (or a single neighbor), every node gets the mid radius.
-function makeScoreToRadius(neighbors) {
+function makeScoreToRadius(neighbors, nMin, nMax) {
   const scores = neighbors.map(n => (typeof n.score === 'number' ? n.score : 0));
   const lo = Math.min(...scores);
   const hi = Math.max(...scores);
   const span = hi - lo;
-  const mid = (NEIGHBOR_R_MIN + NEIGHBOR_R_MAX) / 2;
+  const mid = (nMin + nMax) / 2;
   return (score) => {
     if (!(span > 0)) return mid;                       // all-equal / single → mid
     const t = Math.max(0, Math.min(1, (score - lo) / span)); // clamp to [0,1]
-    return NEIGHBOR_R_MIN + t * (NEIGHBOR_R_MAX - NEIGHBOR_R_MIN);
+    return nMin + t * (nMax - nMin);
   };
 }
 
@@ -1078,12 +1111,13 @@ function egoEmptyCaption(reason) {
 // (no sweep) → its hover then shows the title alone (no "best match · cosine …").
 // (3.8a) emptyReason — when neighbors is empty (lone center), selects the honest caption via
 // egoEmptyCaption ('unconnected' | 'below-floor' | 'unresolved'); ignored when a ring renders.
-function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason = null) {
+function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason = null, profile = null) {
+  const G = profile || GRAPH_PROFILE_DESKTOP; // (3.8c) desktop profile mirrors the bare constants → byte-identical
   bodyEl.innerHTML = '';
   const panel = makeGraphPanel();
 
   const svg = svgEl('svg', {
-    viewBox: `0 0 ${GRAPH_VB_W} ${GRAPH_VB_H}`,
+    viewBox: `0 0 ${G.vbW} ${G.vbH}`,
     width: '100%',
     role: 'img',
     'aria-label': 'Ego-graph of the best-match memo and its nearest neighbors',
@@ -1092,9 +1126,12 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
   svg.style.display = 'block';
   svg.style.width = '100%';
   svg.style.height = 'auto';
-  svg.style.maxWidth = `${GRAPH_VB_W}px`;
+  svg.style.maxWidth = `${G.vbW}px`;
   svg.style.margin = '0 auto';
   svg.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif';
+  // (3.8c) Disable double-tap-zoom so it can't fight the 3.7 overlay open gesture on touch
+  // (inert on non-touch / desktop). Single inline style; no media query needed.
+  svg.style.touchAction = 'manipulation';
 
   // Scoped hover styling: emphasize a node's stroke and bold its label on hover. Desktop
   // hover only (mobile tap is 3.8). (3.6a) NEIGHBOR nodes are single-click pivot targets →
@@ -1118,14 +1155,14 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
     return {
       n,
       angle,
-      x: GRAPH_CX + GRAPH_RING_R * Math.cos(angle),
-      y: GRAPH_CY + GRAPH_RING_R * Math.sin(angle)
+      x: G.cx + G.ringR * Math.cos(angle),
+      y: G.cy + G.ringR * Math.sin(angle)
     };
   });
 
   for (const p of positions) {
     svg.appendChild(svgEl('line', {
-      x1: GRAPH_CX, y1: GRAPH_CY, x2: p.x, y2: p.y,
+      x1: G.cx, y1: G.cy, x2: p.x, y2: p.y,
       stroke: C_SPOKE, 'stroke-width': 1.5
     }));
   }
@@ -1153,7 +1190,7 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
   // ---- neighbor nodes (on top of spokes) ----
   // (3.8b) The single-click disambiguation timer is now MODULE-scoped (pendingClickTimer /
   // cancelPendingPivot) so a re-render can't strand it; the handlers below reference it by name.
-  const scoreToRadius = count ? makeScoreToRadius(neighbors) : null;
+  const scoreToRadius = count ? makeScoreToRadius(neighbors, G.nMin, G.nMax) : null;
   for (const p of positions) {
     const r = scoreToRadius(typeof p.n.score === 'number' ? p.n.score : 0);
 
@@ -1206,13 +1243,13 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
     const lx = p.x + ux * (r + 9);
     const ly = p.y + uy * (r + 9) + (uy >= 0 ? 10 : -2); // nudge below/above by hemisphere
     let anchor = 'middle';
-    if (p.x - GRAPH_CX > 24) anchor = 'start';
-    else if (p.x - GRAPH_CX < -24) anchor = 'end';
+    if (p.x - G.cx > 24) anchor = 'start';
+    else if (p.x - G.cx < -24) anchor = 'end';
 
     const label = svgEl('text', {
       x: lx, y: ly, 'text-anchor': anchor, 'font-size': 12, fill: C_INK_BODY, class: 'ego-label'
     });
-    label.textContent = truncateLabel(p.n.title, LABEL_TRUNCATE_NEIGHBOR);
+    label.textContent = truncateLabel(p.n.title, G.labelN);
     g.appendChild(label);
 
     svg.appendChild(g);
@@ -1229,14 +1266,14 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
   cTip.textContent = `${center.title || '(untitled)'}${centerScoreSuffix}`;
   cg.appendChild(cTip);
   cg.appendChild(svgEl('circle', {
-    cx: GRAPH_CX, cy: GRAPH_CY, r: CENTER_NODE_R,
+    cx: G.cx, cy: G.cy, r: G.centerR,
     fill: C_INK, stroke: C_INK, 'stroke-width': 1.5
   }));
   const cLabel = svgEl('text', {
-    x: GRAPH_CX, y: GRAPH_CY + 4, 'text-anchor': 'middle',
+    x: G.cx, y: G.cy + 4, 'text-anchor': 'middle',
     'font-size': 12, 'font-weight': 600, fill: '#fff', class: 'ego-label'
   });
-  cLabel.textContent = truncateLabel(center.title, LABEL_TRUNCATE_CENTER / 2); // fits inside node
+  cLabel.textContent = truncateLabel(center.title, G.labelC / 2); // fits inside node
   cg.appendChild(cLabel);
   // (3.7) Double-click the center to open its FULL memo (already in hand). The center has no
   // single-click/pivot handler, so no disambiguator dance is needed.
