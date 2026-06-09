@@ -1,0 +1,108 @@
+name: restore-drill
+
+on:
+  schedule:
+    - cron: '37 3 * * 1'        # Mondays 03:37 UTC, weekly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-drill
+  cancel-in-progress: false
+
+env:
+  B2_BUCKET: "billy-revamp-backups"
+  B2_S3_ENDPOINT: "https://s3.eu-central-003.backblazeb2.com"
+  AWS_DEFAULT_REGION: "eu-central-003"
+  CANARY_USERNAME: "drill-canary"
+  CANARY_MARKER: "billy-restore-drill-canary-do-not-delete"
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    environment: restore-drill          # age private key + RO/canary secrets live here, NOT in the backup job
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: drill
+          POSTGRES_DB: drill
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - name: Check out repo (needed for ops/restore-drill/verify-canary.mjs)
+        uses: actions/checkout@v4
+
+      - name: Install age + postgresql-client-17 (match the pg17 dump format)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y age curl ca-certificates
+          # ubuntu-latest ships pg16; a pg16 pg_restore can reject a pg17 custom-format archive.
+          # Pull the pg17 client from the PGDG apt repo so pg_restore matches the dump.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          pg_restore --version
+
+      - name: Fetch latest backup from B2 (read-only key)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID_RO }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APP_KEY_RO }}
+        run: |
+          set -euo pipefail
+          LATEST="$(aws s3 ls "s3://${B2_BUCKET}/daily/" --endpoint-url "${B2_S3_ENDPOINT}" | sort | tail -n1 | awk '{print $4}')"
+          test -n "$LATEST" || { echo "no backup found in daily/"; exit 1; }
+          echo "Latest backup: $LATEST"
+          aws s3 cp "s3://${B2_BUCKET}/daily/${LATEST}" latest.dump.age --endpoint-url "${B2_S3_ENDPOINT}"
+
+      - name: Decrypt with age (DRILL private key from environment — operator key stays offline)
+        run: |
+          set -euo pipefail
+          # secrets.AGE_PRIVATE_KEY here is the DRILL key's private half (restore-drill environment),
+          # NOT the operator's offline identity. Both are recipients of every dump (see nightly-backup).
+          printf '%s' "${{ secrets.AGE_PRIVATE_KEY }}" > identity.txt
+          age -d -i identity.txt -o latest.dump latest.dump.age
+          rm -f identity.txt
+          test -s latest.dump
+
+      - name: Restore into ephemeral Postgres (STRUCTURAL assertion)
+        run: |
+          set -euo pipefail
+          export PGPASSWORD=drill
+          # pg_restore can exit non-zero on ignorable errors (e.g. column defaults that reference
+          # the Supabase `extensions` schema, absent in bare pg). Don't let that fail the drill —
+          # gate on the actual restored row count instead.
+          pg_restore --no-owner --no-acl --no-comments -h localhost -U postgres -d drill latest.dump \
+            || echo "pg_restore reported non-fatal errors; continuing to row-count gate"
+          ROWS=$(psql -h localhost -U postgres -d drill -tAc "select count(*) from memos;")
+          echo "memos rows restored: $ROWS"
+          test "$ROWS" -ge 1 || { echo "no memo rows restored — restore genuinely failed"; exit 1; }
+
+      - name: Decrypt canary (CRYPTOGRAPHIC assertion)
+        env:
+          CANARY_PASSWORD: ${{ secrets.CANARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export PGPASSWORD=drill
+          ROW=$(psql -h localhost -U postgres -d drill -tAF $'\t' -c \
+            "select u.salt, u.dek_wrapped_by_password, u.dek_wrapped_by_password_iv, m.memo_ciphertext, m.memo_iv \
+             from users u join memos m on m.user_id = u.id where u.username = '${CANARY_USERNAME}' limit 1;")
+          test -n "$ROW" || { echo "canary user/memo not present in restored dump"; exit 1; }
+          IFS=$'\t' read -r SALT DEKW DEKW_IV MEMO_CT MEMO_IV <<< "$ROW"
+          node ops/restore-drill/verify-canary.mjs "$SALT" "$DEKW" "$DEKW_IV" "$MEMO_CT" "$MEMO_IV"
+
+      - name: Heartbeat success
+        run: curl -fsS -m 10 --retry 3 "${{ secrets.DRILL_HEALTHCHECK_URL }}"
+
+      - name: Heartbeat failure
+        if: failure()
+        run: curl -fsS -m 10 --retry 3 "${{ secrets.DRILL_HEALTHCHECK_URL }}/fail" || true
