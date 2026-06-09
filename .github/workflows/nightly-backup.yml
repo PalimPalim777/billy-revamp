@@ -4,10 +4,6 @@ on:
   schedule:
     - cron: '17 2 * * *'        # 02:17 UTC nightly (off-the-hour; GH cron is best-effort)
   workflow_dispatch:
-  # >>> TEMP-VERIFY-TRIGGER (remove before merge — lets the branch push auto-run for verification)
-  push:
-    branches: [revamp/backup-job]
-  # <<< TEMP-VERIFY-TRIGGER
 
 permissions:
   contents: read
