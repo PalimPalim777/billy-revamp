@@ -41,12 +41,18 @@ jobs:
           test -s "billy-${STAMP}.dump"
           ls -l "billy-${STAMP}.dump"
 
-      - name: Encrypt with age (recipient public key only)
+      - name: Encrypt with age (operator + drill recipients)
         run: |
           set -euo pipefail
-          printf '%s' "${{ secrets.AGE_PUBLIC_KEY }}" > recipient.txt
-          age -R recipient.txt -o "billy-${STAMP}.dump.age" "billy-${STAMP}.dump"
-          rm -f "billy-${STAMP}.dump"
+          # Encrypt to TWO recipients: the operator's offline key (private half stays in the
+          # password manager, never in GitHub) and a dedicated drill key (private half lives in
+          # the restore-drill environment). Either can decrypt; the operator key never enters CI.
+          {
+            printf '%s\n' "${{ secrets.AGE_PUBLIC_KEY }}"
+            printf '%s\n' "${{ secrets.AGE_PUBLIC_KEY_DRILL }}"
+          } > recipients.txt
+          age -R recipients.txt -o "billy-${STAMP}.dump.age" "billy-${STAMP}.dump"
+          rm -f "billy-${STAMP}.dump" recipients.txt
           test -s "billy-${STAMP}.dump.age"
 
       - name: Upload to B2 (S3 API)
