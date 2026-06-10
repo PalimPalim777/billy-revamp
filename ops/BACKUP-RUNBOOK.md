@@ -38,3 +38,71 @@ Nightly pg_dump of the Supabase `public` schema, age-encrypted, stored in Backbl
 
 ## Restore
 - See Phase 4.1b (restore drill + canary decrypt). Until 4.1b lands, these backups are UNVERIFIED.
+
+## Manual full-fidelity restore into throwaway Supabase — DEFERRED
+
+Status: deferred, NOT gate-blocking. The weekly restore-drill (restore-drill.yml) already proves
+pull-from-B2 -> age-decrypt -> pg_restore into Postgres 17 -> row-count gate -> canary memo decrypts
+to real plaintext. That is sufficient durability proof for single-user (operator) dogfood.
+
+This manual procedure additionally exercises Supabase-specific objects (RLS policies reattaching, the
+live app reading restored data) that a bare-Postgres restore does not. Its marginal value is narrow
+because the nightly dump is `--schema=public` only: the auth schema, Supabase-managed roles, and
+extensions are NOT in the backup. A freshly provisioned Supabase project recreates that scaffolding,
+and the dump's public tables + RLS land on top.
+
+WHEN TO DO THIS: before onboarding a SECOND user (before any non-operator data exists). That is when
+other people's data raises the stakes enough to justify the full-fidelity rehearsal.
+
+WHY NOT YET: requires a real terminal to paste a private key and open an outbound Postgres connection
+to the scratch project. Claude Code Web cannot do it (no TTY; pg17 client install and outbound DB port
+are network-blocked there). Run it on a laptop/VM/WSL you control.
+
+KEY TO USE: the DRILL private key (already a recipient of every dump), NOT the operator key. Keeps the
+offline operator key out of any new environment.
+
+Procedure (Ubuntu / WSL):
+
+    # 0. Tooling — pg17 client via PGDG apt repo (matches the pg17 --format=custom dump)
+    sudo apt-get update && sudo apt-get install -y age awscli curl ca-certificates
+    sudo install -d /usr/share/postgresql-common/pgdg
+    sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo $VERSION_CODENAME)-pgdg main" \
+      | sudo tee /etc/apt/sources.list.d/pgdg.list
+    sudo apt-get update && sudo apt-get install -y postgresql-client-17
+
+    # 1. B2 read-only creds (paste; never commit)
+    export AWS_ACCESS_KEY_ID=...        # B2 RO keyID
+    export AWS_SECRET_ACCESS_KEY=...    # B2 RO appKey
+    export AWS_DEFAULT_REGION=eu-central-003
+    EP=https://s3.eu-central-003.backblazeb2.com
+    BUCKET=billy-revamp-backups
+
+    # 2. Fetch the latest nightly dump
+    LATEST=$(aws s3 ls "s3://$BUCKET/daily/" --endpoint-url "$EP" | sort | tail -1 | awk '{print $4}')
+    aws s3 cp "s3://$BUCKET/daily/$LATEST" "./$LATEST" --endpoint-url "$EP"
+
+    # 3. Decrypt with the DRILL identity (paste key into the file, shred after)
+    printf '%s\n' 'AGE-SECRET-KEY-1...' > drill-identity.txt
+    age -d -i drill-identity.txt -o restore.dump "$LATEST"
+
+    # 4. Provision a THROWAWAY project (name billy-restore-test, region eu-west-3), then restore into
+    #    it via its SESSION-pooler connection string (NOT direct/IPv6, NOT transaction mode 6543):
+    pg_restore --no-owner --no-acl --no-comments --clean --if-exists \
+      -d "postgresql://postgres.<ref>:<PW>@aws-1-eu-west-3.pooler.supabase.com:5432/postgres?sslmode=require" \
+      restore.dump
+
+    # 5. Verify (psql or the throwaway project's Supabase SQL editor):
+    #    - row counts:    select count(*) from memos;  select count(*) from users;
+    #    - RLS present:   select schemaname, tablename, policyname from pg_policies where schemaname='public';
+    #    - (fuller) point a local run of the app at the throwaway project, log in as drill-canary,
+    #      confirm the canary memo renders DECRYPTED in the UI.
+
+    # 6. Tear down
+    shred -u drill-identity.txt 2>/dev/null || rm -f drill-identity.txt
+    rm -f "$LATEST" restore.dump
+    #    Delete billy-restore-test: Supabase -> Project Settings -> General -> Delete project.
+
+Sign-off: when this passes once, record the date here. Until then, the weekly drill is the standing
+durability guarantee.
