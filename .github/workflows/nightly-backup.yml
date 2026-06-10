@@ -42,15 +42,23 @@ jobs:
           ls -l "billy-${STAMP}.dump"
 
       - name: Encrypt with age (operator + drill recipients)
+        env:
+          AGE_PUBLIC_KEY: ${{ secrets.AGE_PUBLIC_KEY }}
+          AGE_PUBLIC_KEY_DRILL: ${{ secrets.AGE_PUBLIC_KEY_DRILL }}
         run: |
           set -euo pipefail
-          # Encrypt to TWO recipients: the operator's offline key (private half stays in the
-          # password manager, never in GitHub) and a dedicated drill key (private half lives in
-          # the restore-drill environment). Either can decrypt; the operator key never enters CI.
+          # Encrypt to TWO recipients: operator (offline) + drill (restore-drill env).
+          # Guard: a blank/missing recipient silently yields a dump the drill cannot
+          # decrypt, producing false-green backups. Fail fast instead.
+          test -n "$AGE_PUBLIC_KEY"       || { echo "FATAL: AGE_PUBLIC_KEY is empty"; exit 1; }
+          test -n "$AGE_PUBLIC_KEY_DRILL" || { echo "FATAL: AGE_PUBLIC_KEY_DRILL is empty"; exit 1; }
+          case "$AGE_PUBLIC_KEY"       in age1*) ;; *) echo "FATAL: AGE_PUBLIC_KEY not an age recipient"; exit 1 ;; esac
+          case "$AGE_PUBLIC_KEY_DRILL" in age1*) ;; *) echo "FATAL: AGE_PUBLIC_KEY_DRILL not an age recipient"; exit 1 ;; esac
           {
-            printf '%s\n' "${{ secrets.AGE_PUBLIC_KEY }}"
-            printf '%s\n' "${{ secrets.AGE_PUBLIC_KEY_DRILL }}"
+            printf '%s\n' "$AGE_PUBLIC_KEY"
+            printf '%s\n' "$AGE_PUBLIC_KEY_DRILL"
           } > recipients.txt
+          test "$(grep -c . recipients.txt)" -eq 2 || { echo "FATAL: expected exactly 2 recipients"; exit 1; }
           age -R recipients.txt -o "billy-${STAMP}.dump.age" "billy-${STAMP}.dump"
           rm -f "billy-${STAMP}.dump" recipients.txt
           test -s "billy-${STAMP}.dump.age"
