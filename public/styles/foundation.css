@@ -3,10 +3,10 @@
 
 :root {
   color-scheme: dark;
-  --bg: #000000;
-  --surface: #1c1c1e;
-  --surface-2: #2c2c2e;
-  --separator: #38383a;
+  --bg: #121214;
+  --surface: #1e1e21;
+  --surface-2: #2e2e31;
+  --separator: #3a3a3d;
   --text: rgba(255, 255, 255, 0.92);
   --text-2: #8e8e93;
   --text-3: #636366;
@@ -155,3 +155,23 @@ button.secondary:hover:not(:disabled), .toggle:hover:not(:disabled), .chip:hover
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* ui-polish-1: specificity + geometry fixes */
+.links a, .signin-link a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.links a:hover, .signin-link a:hover { color: #ffb340; text-decoration: underline; }
+.links, .signin-link { line-height: 1.9; }
+.cta-row { gap: 12px; }
+.cta-row .btn {
+  flex: 0 0 auto;
+  max-width: none;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 13px 30px;
+  font-size: 15px;
+  line-height: 1;
+}
+.pill, .pill-quiet, button { white-space: nowrap; }
+textarea { white-space: pre-wrap; }
