@@ -32,6 +32,7 @@
 // parity). The 3.4a neighbor layer talks ONLY to GET /api/memos/<id>/connection-blob
 // (ciphertext-only, merged in #10) and the existing GET /api/memos/<id> (ciphertext-only)
 // — no plaintext crosses the server, no batch endpoint, no /api or schema change.
+// ui-retrieve-graph: dark-theme paint migration (colors only, no logic)
 import { startLoadingEmbeddingModel, embedText, base64ToFloat32Array, topKNeighbors } from '/lib/embeddings.js';
 import { getSessionDEK } from '/crypto/session-dek.js';
 import { decryptStringWithDEK } from '/crypto/dek.js';
@@ -861,7 +862,7 @@ function buildMemoOverlay(memo) {
   backdrop.setAttribute('aria-label', memo.title || 'Memo');
   backdrop.style.position = 'fixed';
   backdrop.style.inset = '0';
-  backdrop.style.background = 'rgba(0,0,0,0.45)';
+  backdrop.style.background = 'rgba(0,0,0,0.6)';
   backdrop.style.display = 'flex';
   backdrop.style.alignItems = 'center';
   backdrop.style.justifyContent = 'center';
@@ -1022,17 +1023,19 @@ function graphProfile() {
 }
 
 // Design-token palette (lifted from public/app.html so the graph reads as part of the app).
-const C_INK = '#111';            // center node fill / primary ink (brand dark, = button)
-const C_INK_BODY = '#222';       // label ink
-const C_MUTED = '#888';          // captions
-const C_NODE_FILL = '#fff';      // neighbor fill (card surface)
-const C_NODE_STROKE = '#111';    // neighbor stroke
-const C_SPOKE = '#dcdcdc';       // center spokes (subtle, ~ the app's #ddd lines), solid 1.5
+const C_INK = 'rgba(255,255,255,0.92)'; // primary ink / hover label
+const C_INK_BODY = '#8e8e93';    // label ink
+const C_MUTED = '#8e8e93';       // captions
+const C_NODE_FILL = '#2e2e31';   // neighbor fill (surface-2)
+const C_NODE_STROKE = '#48484a'; // neighbor stroke
+const C_SPOKE = 'rgba(255,255,255,0.22)'; // center spokes
 
 // 3.5 inter-neighbor edges: deliberately DISTINCT from the solid grey center spokes — a muted
 // blue, dashed, lighter weight — so a center spoke vs a neighbor↔neighbor edge reads at a
 // glance. UNIFORM (not scaled by strength; node size already encodes magnitude).
-const C_INTER_EDGE = '#7aa7d6';  // muted blue (vs the grey spokes)
+const C_INTER_EDGE = 'rgba(255,255,255,0.12)'; // inter-neighbor edges (dashed)
+const C_CENTER_FILL = '#ff9f0a'; // center node (accent)
+const C_CENTER_LABEL = '#000000'; // label on center node
 const INTER_EDGE_WIDTH = 1;      // lighter than the 1.5 spokes
 const INTER_EDGE_DASH = '5 4';   // dashed (vs solid spokes)
 
@@ -1267,11 +1270,11 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
   cg.appendChild(cTip);
   cg.appendChild(svgEl('circle', {
     cx: G.cx, cy: G.cy, r: G.centerR,
-    fill: C_INK, stroke: C_INK, 'stroke-width': 1.5
+    fill: C_CENTER_FILL, stroke: C_CENTER_FILL, 'stroke-width': 1.5
   }));
   const cLabel = svgEl('text', {
     x: G.cx, y: G.cy + 4, 'text-anchor': 'middle',
-    'font-size': 12, 'font-weight': 600, fill: '#fff', class: 'ego-label'
+    'font-size': 12, 'font-weight': 600, fill: C_CENTER_LABEL, class: 'ego-label'
   });
   cLabel.textContent = truncateLabel(center.title, G.labelC / 2); // fits inside node
   cg.appendChild(cLabel);
