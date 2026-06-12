@@ -33,6 +33,7 @@
 // (ciphertext-only, merged in #10) and the existing GET /api/memos/<id> (ciphertext-only)
 // — no plaintext crosses the server, no batch endpoint, no /api or schema change.
 // ui-retrieve-graph: dark-theme paint migration (colors only, no logic)
+// ui-breadcrumb-row: crumb chip restyle + Return-to-origin pinned right (paint/layout only)
 import { startLoadingEmbeddingModel, embedText, base64ToFloat32Array, topKNeighbors } from '/lib/embeddings.js';
 import { getSessionDEK } from '/crypto/session-dek.js';
 import { decryptStringWithDEK } from '/crypto/dek.js';
@@ -234,12 +235,13 @@ export function mountRetrieve(container) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.textContent = truncateLabel(trail[i].title, 18);
-        btn.style.border = `1px solid ${C_SPOKE}`;
+        btn.style.border = 'none';
         btn.style.background = C_NODE_FILL;
-        btn.style.color = C_INK_BODY;
+        btn.style.color = C_CENTER_FILL;
         btn.style.borderRadius = '999px';
-        btn.style.padding = '2px 10px';
+        btn.style.padding = '3px 12px';
         btn.style.fontSize = '12px';
+        btn.style.fontWeight = '500';
         btn.style.cursor = 'pointer';
         btn.disabled = navBusy;
         btn.style.opacity = navBusy ? '0.5' : '1';
@@ -259,12 +261,16 @@ export function mountRetrieve(container) {
     const ret = document.createElement('button');
     ret.type = 'button';
     ret.textContent = 'Return to origin';
-    ret.style.background = 'transparent';
+    ret.style.background = C_NODE_FILL;
     ret.style.border = 'none';
-    ret.style.color = C_MUTED;
+    ret.style.color = C_INK;
     ret.style.fontSize = '12px';
+    ret.style.fontWeight = '500';
     ret.style.cursor = 'pointer';
-    ret.style.padding = '2px 6px';
+    ret.style.padding = '3px 12px';
+    ret.style.borderRadius = '999px';
+    ret.style.marginLeft = 'auto';
+    ret.style.opacity = navBusy ? '0.5' : '1';
     ret.disabled = navBusy;
     ret.addEventListener('click', () => goToIndex(0));
     breadcrumbsEl.appendChild(ret);
