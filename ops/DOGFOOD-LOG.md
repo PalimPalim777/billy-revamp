@@ -17,9 +17,11 @@ needed. When fixed: append `→ fixed in revamp/<branch> (merged YYYY-MM-DD)`.
 
 ## Open
 
-- 2026-06-12 · papercut · capture · Capture surface still legacy: monospace
-  15px input, two-pill mode toggle instead of segmented control, no save
-  feedback moment. Redesign branch ui-capture pending.
+- 2026-06-12 · idea · capture · Live amber hashtag tinting while typing
+  (needs input-overlay technique on the conversational textarea; weigh value
+  at exit review since tags are LLM-extracted from the transcript).
+- 2026-06-12 · idea · capture · Single-shot quick-capture mode (type one
+  memo, skip the conversation) — product flow change, not restyling.
 - 2026-06-12 · papercut · auth · Auth surfaces (login, signup, setup,
   recovery, unlock) functionally dark-themed but not yet restyled to spec
   (recovery phrase grid, confirm step, key step). Redesign branch ui-auth
@@ -27,6 +29,11 @@ needed. When fixed: append `→ fixed in revamp/<branch> (merged YYYY-MM-DD)`.
 
 ## Fixed
 
+- 2026-06-12 · papercut · capture · Capture surface legacy: monospace 15px
+  input (also triggered iOS focus-zoom on sub-16px inputs app-wide),
+  two-pill mode toggle, light-theme status colors, save/discard buttons
+  visually identical.
+  → fixed in revamp/ui-capture (merged 2026-06-12)
 - 2026-06-12 · bug · retrieve/graph · Double-tap to open memo overlay dead on
   iOS (Safari does not synthesize dblclick on SVG in standalone PWAs); two
   fast taps on different neighbors silently killed both actions.

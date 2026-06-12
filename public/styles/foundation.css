@@ -175,3 +175,31 @@ button.secondary:hover:not(:disabled), .toggle:hover:not(:disabled), .chip:hover
 }
 .pill, .pill-quiet, button { white-space: nowrap; }
 textarea { white-space: pre-wrap; }
+
+/* ui-capture: capture surface restyle + iOS input-zoom floor */
+input[type="text"], input[type="password"], textarea { font-size: 16px; }
+#captureInput {
+  font-family: inherit;
+  font-size: 17px;
+  line-height: 1.5;
+  min-height: 96px;
+  padding: 12px 14px;
+}
+.messages {
+  border: none;
+  background: var(--surface);
+  border-radius: var(--radius-card);
+  padding: 14px;
+  max-height: 55vh;
+}
+.who { color: var(--text-3); }
+.msg-body { font-size: 16px; }
+.memo-card { border: none; border-radius: var(--radius-card); padding: 16px; }
+.memo-summary { color: var(--text-2); }
+#endBtn, #discardBtn {
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 500;
+}
+#endBtn:hover:not(:disabled), #discardBtn:hover:not(:disabled) { background: #3a3a3d; }
+.connected { font-size: 15px; font-weight: 500; }
