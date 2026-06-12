@@ -22,13 +22,13 @@ needed. When fixed: append `→ fixed in revamp/<branch> (merged YYYY-MM-DD)`.
   at exit review since tags are LLM-extracted from the transcript).
 - 2026-06-12 · idea · capture · Single-shot quick-capture mode (type one
   memo, skip the conversation) — product flow change, not restyling.
-- 2026-06-12 · papercut · auth · Auth surfaces (login, signup, setup,
-  recovery, unlock) functionally dark-themed but not yet restyled to spec
-  (recovery phrase grid, confirm step, key step). Redesign branch ui-auth
-  pending.
 
 ## Fixed
 
+- 2026-06-12 · papercut · auth · Auth surfaces dark via foundation overrides
+  but phrase grid was 4-col (unreadable at iPhone width), confirm grid 3-col,
+  plus two stray light-theme color values in setup.html.
+  → fixed in revamp/ui-auth (merged 2026-06-12)
 - 2026-06-12 · papercut · capture · Capture surface legacy: monospace 15px
   input (also triggered iOS focus-zoom on sub-16px inputs app-wide),
   two-pill mode toggle, light-theme status colors, save/discard buttons
