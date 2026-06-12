@@ -203,3 +203,21 @@ input[type="text"], input[type="password"], textarea { font-size: 16px; }
 }
 #endBtn:hover:not(:disabled), #discardBtn:hover:not(:disabled) { background: #3a3a3d; }
 .connected { font-size: 15px; font-weight: 500; }
+
+/* ui-auth: responsive phrase/confirm grids + auth polish */
+.phrase-grid {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 18px;
+  padding: 16px;
+  border-radius: var(--radius-card);
+  font-size: 14px;
+}
+@media (min-width: 600px) {
+  .phrase-grid { grid-template-columns: repeat(4, 1fr); }
+}
+.confirm-grid { grid-template-columns: 1fr; gap: 12px; }
+@media (min-width: 600px) {
+  .confirm-grid { grid-template-columns: repeat(3, 1fr); }
+}
+.warn { border-radius: var(--radius-field); font-size: 14px; line-height: 1.5; }
+#setup-header strong { color: var(--text); }
