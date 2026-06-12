@@ -34,6 +34,7 @@
 // — no plaintext crosses the server, no batch endpoint, no /api or schema change.
 // ui-retrieve-graph: dark-theme paint migration (colors only, no logic)
 // ui-breadcrumb-row: crumb chip restyle + Return-to-origin pinned right (paint/layout only)
+// graph-tap-ios: manual same-node double-tap detection; dblclick wiring removed; center opens on single tap
 import { startLoadingEmbeddingModel, embedText, base64ToFloat32Array, topKNeighbors } from '/lib/embeddings.js';
 import { getSessionDEK } from '/crypto/session-dek.js';
 import { decryptStringWithDEK } from '/crypto/dek.js';
@@ -1056,8 +1057,11 @@ const CLICK_DISAMBIG_MS = 350;
 // a shared handle lets renderEgoGraphForCenter + submit cancel a stale timer). Only one
 // retrieve is mounted per page (app.html guards), so module-level transient state is safe.
 let pendingClickTimer = null;
+let pendingClickNode = null; // memo_id that armed the timer; same-node 2nd tap opens the overlay
 function cancelPendingPivot() {
-  if (pendingClickTimer !== null) { clearTimeout(pendingClickTimer); pendingClickTimer = null; }
+  if (pendingClickTimer !== null) { clearTimeout(pendingClickTimer); }
+  pendingClickTimer = null;
+  pendingClickNode = null;
 }
 
 function svgEl(tag, attrs) {
@@ -1148,6 +1152,7 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
   const style = svgEl('style');
   style.textContent = `
     .ego-node { cursor: default; }
+    .ego-center { cursor: pointer; }
     .ego-neighbor { cursor: pointer; }
     .ego-neighbor circle { transition: stroke-width .12s ease; }
     .ego-neighbor:hover circle { stroke-width: 3; }
@@ -1205,34 +1210,29 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
 
     const g = svgEl('g', { class: 'ego-node ego-neighbor' });
 
-    // (3.6a) Single-click this NEIGHBOR to re-center the graph on it (pivot). The ~240ms
-    // disambiguator holds the single-click action briefly so a double-click can pre-empt it,
-    // reserving double-click for the 3.7 full-memo overlay without a pivot firing underneath.
-    // The center node deliberately gets NO pivot handlers (it is not a pivot target).
+    // (3.6a→tap-ios) Single click/tap on a NEIGHBOR re-centers the graph on it (pivot), held
+    // for CLICK_DISAMBIG_MS so a 2nd tap can pre-empt it. The 2nd click/tap on the SAME node
+    // inside the window opens the 3.7 overlay DIRECTLY — manual double-tap detection, because
+    // iOS Safari does not reliably synthesize dblclick on SVG (especially standalone PWAs).
+    // A tap on a DIFFERENT node cancels the old pending pivot and arms its own, so two fast
+    // taps on different neighbors no longer silently kill both actions.
     if (onPivot) {
       const neighborMemoId = p.n.memo_id;
       g.addEventListener('click', () => {
-        if (pendingClickTimer !== null) {
-          // 2nd click of a double-click → cancel the pending pivot; let dblclick handle it.
-          clearTimeout(pendingClickTimer);
-          pendingClickTimer = null;
+        if (pendingClickTimer !== null && pendingClickNode === neighborMemoId) {
+          cancelPendingPivot();
+          // (3.7) Open the FULL memo (already in hand on the node) over the cluster.
+          if (p.n.memo) openMemoOverlay(p.n.memo);
           return;
         }
+        cancelPendingPivot();
+        pendingClickNode = neighborMemoId;
         pendingClickTimer = setTimeout(() => {
           pendingClickTimer = null;
+          pendingClickNode = null;
           // (3.6b) onPivot(memoId, title) → pivotTo: push a crumb, then re-center (3.6a fetch by id).
           onPivot(neighborMemoId, p.n.title);
         }, CLICK_DISAMBIG_MS);
-      });
-      g.addEventListener('dblclick', () => {
-        // Keep the 3.6a guard: cancel the pending single-click pivot so it never fires under the
-        // overlay (the 240ms disambiguator + single-click pivot are otherwise unchanged).
-        if (pendingClickTimer !== null) {
-          clearTimeout(pendingClickTimer);
-          pendingClickTimer = null;
-        }
-        // (3.7) Open the FULL memo (already in hand on the node) over the cluster.
-        if (p.n.memo) openMemoOverlay(p.n.memo);
       });
     }
 
@@ -1284,9 +1284,10 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
   });
   cLabel.textContent = truncateLabel(center.title, G.labelC / 2); // fits inside node
   cg.appendChild(cLabel);
-  // (3.7) Double-click the center to open its FULL memo (already in hand). The center has no
-  // single-click/pivot handler, so no disambiguator dance is needed.
-  cg.addEventListener('dblclick', () => { if (center.memo) openMemoOverlay(center.memo); });
+  // (3.7→tap-ios) SINGLE click/tap on the center opens its FULL memo (already in hand). The
+  // center is not a pivot target — no competing action, no disambiguator — and dblclick is
+  // unreliable on iOS SVG, so single-tap is the dependable affordance.
+  cg.addEventListener('click', () => { if (center.memo) openMemoOverlay(center.memo); });
   svg.appendChild(cg);
 
   panel.appendChild(svg);
