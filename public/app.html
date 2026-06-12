@@ -98,9 +98,9 @@
            only ever visible in the onboarded+unlocked surface; the onboarding
            key-paste view (#onboardView) never shows it. Capture is active on every
            load of /app; last-used mode is intentionally not persisted in 3.1. -->
-      <div class="row mode-toggle" id="modeToggle">
-        <button id="modeCaptureBtn" class="toggle active" type="button" aria-pressed="true">Capture</button>
-        <button id="modeRetrieveBtn" class="toggle" type="button" aria-pressed="false">Retrieve</button>
+      <div class="seg mode-toggle" id="modeToggle">
+        <button id="modeCaptureBtn" class="seg-btn active" type="button" aria-pressed="true">Capture</button>
+        <button id="modeRetrieveBtn" class="seg-btn" type="button" aria-pressed="false">Retrieve</button>
       </div>
 
       <!-- Capture surface, wrapped only. Its markup, element IDs and event
@@ -395,9 +395,9 @@
 
     function showEmbeddingStatus(state) {
       const map = {
-        embedding: { text: 'Embedding…', color: '#888' },
-        embedded: { text: 'Embedded ✓', color: '#1a7f37' },
-        pending: { text: 'Embedding pending — will retry', color: '#b8860b' }
+        embedding: { text: 'Embedding…', color: '#8e8e93' },
+        embedded: { text: 'Embedded ✓', color: '#30d158' },
+        pending: { text: 'Embedding pending — will retry', color: '#ff9f0a' }
       };
       const s = map[state];
       if (!s) { embedStatusEl.style.display = 'none'; return; }
@@ -408,11 +408,11 @@
 
     function showBlobStatus(state, n) {
       let text, color;
-      if (state === 'connecting') { text = 'Connecting…'; color = '#888'; }
+      if (state === 'connecting') { text = 'Connecting…'; color = '#8e8e93'; }
       else if (state === 'connected') {
         text = (n && n > 0) ? `Connected to ${n} neighbor(s) ✓` : 'Connected (first memo) ✓';
-        color = '#1a7f37';
-      } else if (state === 'pending') { text = 'Connection pending — will retry'; color = '#b8860b'; }
+        color = '#30d158';
+      } else if (state === 'pending') { text = 'Connection pending — will retry'; color = '#ff9f0a'; }
       else { blobStatusEl.style.display = 'none'; return; }
       blobStatusEl.textContent = text;
       blobStatusEl.style.color = color;
