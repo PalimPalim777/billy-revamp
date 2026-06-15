@@ -178,16 +178,6 @@ export function mountRetrieve(container) {
       card.appendChild(tags);
     }
 
-    // Surfaced for this milestone's verifiability — the cosine score the center won with.
-    // Only the typed-query best match has a cosine score; a 3.6a pivot center has none (no
-    // sweep), so the line is omitted there rather than printing a meaningless 0.
-    if (typeof score === 'number' && isFinite(score)) {
-      const scoreLine = document.createElement('p');
-      scoreLine.className = 'small';
-      scoreLine.textContent = `Best match · cosine ${score.toFixed(3)}`;
-      card.appendChild(scoreLine);
-    }
-
     return card;
   }
 
