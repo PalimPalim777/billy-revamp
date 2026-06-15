@@ -992,35 +992,35 @@ function closeAnyMemoOverlay() {
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 // viewBox geometry. The SVG scales to its container (width:100%, height:auto) so it never
-// overflows at narrow width; precise mobile density is 3.8.
-const GRAPH_VB_W = 680;
-const GRAPH_VB_H = 500;
-const GRAPH_CX = GRAPH_VB_W / 2;
-const GRAPH_CY = GRAPH_VB_H / 2;
-const GRAPH_RING_R = 158;        // center→neighbor distance
-const CENTER_NODE_R = 48;        // fixed; always the largest node
-const NEIGHBOR_R_MIN = 16;       // weakest-scoring neighbor
-const NEIGHBOR_R_MAX = 34;       // strongest-scoring neighbor (< CENTER_NODE_R)
-const LABEL_TRUNCATE_NEIGHBOR = 16;
-const LABEL_TRUNCATE_CENTER = 22;
+// overflows at narrow width. Nodes are rounded-rectangle memo cards in a STATIC TIERED layout
+// (center card in the middle, neighbour cards in a row above and a row below) — NOT a radial
+// ring — so the per-profile geometry is expressed in card dimensions + row baselines, not radii.
+const LABEL_TRUNCATE_DESKTOP = 20; // per-line char budget for the two-line card title (desktop)
 
-// (3.8c) Geometry profiles. Desktop = the existing constants (byte-identical). Mobile =
-// fewer/larger nodes, tighter ring, longer labels. Selected per-render by viewport width
-// (breakpoint, NOT device detection). STRAWMAN mobile values — tune during verification.
+// (3.8c) Geometry profiles. Selected per-render by viewport width (breakpoint, NOT device
+// detection). Both profiles carry IDENTICAL field names so renderEgoGraph reads them uniformly:
+//   vbW/vbH      — viewBox size (the SVG scales to its container)
+//   cx/cy        — center-card center (also the spoke origin)
+//   centerW/centerH — center card size; nodeW/nodeH — neighbour card size
+//   topRowY/bottomRowY — the two neighbour-row baselines (card-center y)
+//   labelChars   — per-line char budget for the two-line in-card title wrap
+//   neighborCount — how many neighbours are fetched + drawn (the ring cap)
+// Desktop fits ceil(8/2)=4 cards per row via slotWidth = vbW / rowCount (see renderEgoGraph);
+// vbW is widened so 4 cards sit with comfortable gaps and never overlap. STRAWMAN values.
 const GRAPH_MOBILE_MAX_WIDTH = 600; // px; <= this picks the mobile profile
 const GRAPH_PROFILE_DESKTOP = {
-  vbW: GRAPH_VB_W, vbH: GRAPH_VB_H, cx: GRAPH_CX, cy: GRAPH_CY,
-  ringR: GRAPH_RING_R, centerR: CENTER_NODE_R,
-  nMin: NEIGHBOR_R_MIN, nMax: NEIGHBOR_R_MAX,
-  labelN: LABEL_TRUNCATE_NEIGHBOR, labelC: LABEL_TRUNCATE_CENTER,
+  vbW: 820, vbH: 500, cx: 410, cy: 250,
+  centerW: 180, centerH: 56, nodeW: 150, nodeH: 48,
+  topRowY: 78, bottomRowY: 422,
+  labelChars: LABEL_TRUNCATE_DESKTOP,
   neighborCount: NEIGHBOR_DISPLAY_COUNT,
 };
 const GRAPH_PROFILE_MOBILE = {
-  vbW: 400, vbH: 440, cx: 200, cy: 220,
-  ringR: 132, centerR: 44,
-  nMin: 22, nMax: 38,
-  labelN: 22, labelC: 20,
-  neighborCount: 5,
+  vbW: 380, vbH: 460, cx: 190, cy: 230,
+  centerW: 150, centerH: 52, nodeW: 150, nodeH: 46,
+  topRowY: 69, bottomRowY: 391,
+  labelChars: 18,
+  neighborCount: 4,
 };
 // Single viewport snapshot per render. Guard matchMedia for non-browser/test contexts.
 function graphProfile() {
@@ -1043,8 +1043,14 @@ const C_SPOKE = 'rgba(255,255,255,0.22)'; // center spokes
 const C_INTER_EDGE = 'rgba(255,255,255,0.12)'; // inter-neighbor edges (dashed)
 const C_CENTER_FILL = '#ff9f0a'; // center node (accent)
 const C_CENTER_LABEL = '#000000'; // label on center node
-const INTER_EDGE_WIDTH = 1;      // lighter than the 1.5 spokes
+const INTER_EDGE_WIDTH = 1;      // lighter than the spokes
 const INTER_EDGE_DASH = '5 4';   // dashed (vs solid spokes)
+
+// Spokes now carry the connection-strength signal (node size no longer does — cards are uniform):
+// each spoke's stroke-width scales with its neighbour's score, normalised against this set's own
+// min/max into [SPOKE_MIN_WIDTH, SPOKE_MAX_WIDTH]. Equal/absent scores fall back to a flat width.
+const SPOKE_MIN_WIDTH = 1.0;
+const SPOKE_MAX_WIDTH = 3.0;
 
 // 3.6a click/double-click disambiguation window (ms). A single-click pivot waits this long
 // before firing so a double-click — reserved for the 3.7 full-memo overlay — can pre-empt it.
@@ -1092,6 +1098,68 @@ function makeScoreToRadius(neighbors, nMin, nMax) {
     const t = Math.max(0, Math.min(1, (score - lo) / span)); // clamp to [0,1]
     return nMin + t * (nMax - nMin);
   };
+}
+
+// Map a neighbor's score → spoke stroke-width. Mirrors makeScoreToRadius's normalisation:
+// normalize against THIS set's own min/max so strength differences are visible even when cosine
+// scores cluster. Returns a flat 1.5 when a score is absent (null, e.g. a pivot) or every score
+// is equal (single neighbour / divide-by-zero-safe), so the spoke never collapses to a hairline.
+function makeScoreToSpokeWidth(neighbors) {
+  const scores = neighbors.map(n => (typeof n.score === 'number' ? n.score : 0));
+  const lo = Math.min(...scores);
+  const hi = Math.max(...scores);
+  const span = hi - lo;
+  return (score) => {
+    if (typeof score !== 'number' || !(span > 0)) return 1.5; // absent / all-equal → flat
+    const t = Math.max(0, Math.min(1, (score - lo) / span));  // clamp to [0,1]
+    return SPOKE_MIN_WIDTH + t * (SPOKE_MAX_WIDTH - SPOKE_MIN_WIDTH);
+  };
+}
+
+// Wrap a card title to AT MOST two lines for rendering INSIDE the node. Returns [line1, line2]:
+//   - title.length <= maxChars → [title, ''] (one line, vertically centred by the caller).
+//   - otherwise greedily pack whole words into line1 until the next word would exceed maxChars;
+//     a single over-long word that never fits → line1 = title.slice(0, maxChars).
+//   - line2 = the remainder; if it still exceeds maxChars, hard-truncate to maxChars-1 + '…'.
+// The FULL title always lives in the node's <title> for hover, so wrapping never hides info.
+function wrapTwoLines(title, maxChars) {
+  const s = (title || '').trim();
+  if (s.length <= maxChars) return [s, ''];
+  const words = s.split(/\s+/);
+  let line1 = '';
+  let i = 0;
+  for (; i < words.length; i++) {
+    const candidate = line1 ? `${line1} ${words[i]}` : words[i];
+    if (candidate.length > maxChars) break;
+    line1 = candidate;
+  }
+  let line2;
+  if (line1 === '') {
+    // First word alone already exceeds the budget: hard-split it across the two lines.
+    line1 = s.slice(0, maxChars);
+    line2 = s.slice(maxChars);
+  } else {
+    line2 = words.slice(i).join(' ');
+  }
+  if (line2.length > maxChars) line2 = line2.slice(0, maxChars - 1).trimEnd() + '…';
+  return [line1, line2];
+}
+
+// Append a centred, two-line title to a card's SVG group. line2 empty → a single line is
+// vertically centred (y = cy + 4); otherwise line1 sits above (cy - 6) and line2 below (cy + 10).
+// All text via textContent (svgEl) → a hostile title can never inject markup.
+function appendCardLabel(group, title, cx, cy, maxChars, fill, fontWeight) {
+  const [line1, line2] = wrapTwoLines(title, maxChars);
+  const mk = (text, y) => {
+    const t = svgEl('text', {
+      x: cx, y, 'text-anchor': 'middle', 'font-size': 12, fill, class: 'ego-label'
+    });
+    if (fontWeight) t.setAttribute('font-weight', fontWeight);
+    t.textContent = text;
+    group.appendChild(t);
+  };
+  if (line2) { mk(line1, cy - 6); mk(line2, cy + 10); }
+  else { mk(line1, cy + 4); }
 }
 
 // A card-framed panel matching .memo-card so the graph sits in the same visual frame as
@@ -1154,30 +1222,40 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
     .ego-node { cursor: default; }
     .ego-center { cursor: pointer; }
     .ego-neighbor { cursor: pointer; }
-    .ego-neighbor circle { transition: stroke-width .12s ease; }
-    .ego-neighbor:hover circle { stroke-width: 3; }
+    .ego-neighbor rect { transition: stroke-width .12s ease; }
+    .ego-neighbor:hover rect { stroke-width: 3; }
     .ego-neighbor:hover .ego-label { font-weight: 600; fill: ${C_INK}; }
     .ego-label { pointer-events: none; }
   `;
   svg.appendChild(style);
 
-  // ---- spokes first (drawn behind, so nodes sit on top) ----
+  // ---- static tiered layout: center card in the middle, neighbour cards in a row above and a
+  // row below (NO radial ring). Neighbours arrive score-descending; the strongest fill the TOP
+  // row first, then the bottom row, preserving that order. Per design §7 the cards in a row are
+  // evenly spaced by slot: slotWidth = vbW / rowCount; cardCenterX = slotWidth * (index + 0.5).
   const count = neighbors.length;
+  const topCount = Math.ceil(count / 2);
+  const bottomCount = Math.floor(count / 2);
   const positions = neighbors.map((n, i) => {
-    // Start at the top (−90°) and go clockwise, evenly spaced on one ring.
-    const angle = -Math.PI / 2 + (i / count) * 2 * Math.PI;
+    const inTop = i < topCount;
+    const rowIndex = inTop ? i : i - topCount;   // index within its own row
+    const rowCount = inTop ? topCount : bottomCount;
     return {
       n,
-      angle,
-      x: G.cx + G.ringR * Math.cos(angle),
-      y: G.cy + G.ringR * Math.sin(angle)
+      x: (G.vbW / rowCount) * (rowIndex + 0.5),   // slot-centred
+      y: inTop ? G.topRowY : G.bottomRowY         // card-center y
     };
   });
 
+  // ---- spokes first (drawn behind; the opaque cards clip the line ends at their borders) ----
+  // The spoke carries the connection-strength signal now: stroke-width scales with the
+  // neighbour's score (node cards are uniform). Equal/absent scores fall back to a flat width.
+  const scoreToSpokeWidth = count ? makeScoreToSpokeWidth(neighbors) : null;
   for (const p of positions) {
     svg.appendChild(svgEl('line', {
       x1: G.cx, y1: G.cy, x2: p.x, y2: p.y,
-      stroke: C_SPOKE, 'stroke-width': 1.5
+      stroke: C_SPOKE,
+      'stroke-width': scoreToSpokeWidth(typeof p.n.score === 'number' ? p.n.score : null)
     }));
   }
 
@@ -1201,13 +1279,10 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
     }
   }
 
-  // ---- neighbor nodes (on top of spokes) ----
+  // ---- neighbour cards (on top of spokes; opaque rects clip the spoke + edge line ends) ----
   // (3.8b) The single-click disambiguation timer is now MODULE-scoped (pendingClickTimer /
   // cancelPendingPivot) so a re-render can't strand it; the handlers below reference it by name.
-  const scoreToRadius = count ? makeScoreToRadius(neighbors, G.nMin, G.nMax) : null;
   for (const p of positions) {
-    const r = scoreToRadius(typeof p.n.score === 'number' ? p.n.score : 0);
-
     const g = svgEl('g', { class: 'ego-node ego-neighbor' });
 
     // (3.6a→tap-ios) Single click/tap on a NEIGHBOR re-centers the graph on it (pivot), held
@@ -1236,35 +1311,24 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
       });
     }
 
-    const circle = svgEl('circle', {
-      cx: p.x, cy: p.y, r: r,
+    const rect = svgEl('rect', {
+      x: p.x - G.nodeW / 2, y: p.y - G.nodeH / 2,
+      width: G.nodeW, height: G.nodeH, rx: 12,
       fill: C_NODE_FILL, stroke: C_NODE_STROKE, 'stroke-width': 1.5
     });
     // Full title on hover (native SVG tooltip). textContent → no markup injection.
     const tip = svgEl('title');
     tip.textContent = `${p.n.title || '(untitled)'} · cosine ${Number(p.n.score || 0).toFixed(3)}`;
     g.appendChild(tip);
-    g.appendChild(circle);
+    g.appendChild(rect);
 
-    // Truncated label, pushed radially outward so it clears the node. Anchor by hemisphere
-    // (left half → end, right half → start, near-vertical → middle) to reduce overlap.
-    const ux = Math.cos(p.angle), uy = Math.sin(p.angle);
-    const lx = p.x + ux * (r + 9);
-    const ly = p.y + uy * (r + 9) + (uy >= 0 ? 10 : -2); // nudge below/above by hemisphere
-    let anchor = 'middle';
-    if (p.x - G.cx > 24) anchor = 'start';
-    else if (p.x - G.cx < -24) anchor = 'end';
-
-    const label = svgEl('text', {
-      x: lx, y: ly, 'text-anchor': anchor, 'font-size': 12, fill: C_INK_BODY, class: 'ego-label'
-    });
-    label.textContent = truncateLabel(p.n.title, G.labelN);
-    g.appendChild(label);
+    // Title INSIDE the card, clamped to two lines (no outside-the-node radial offset anymore).
+    appendCardLabel(g, p.n.title, p.x, p.y, G.labelChars, C_INK);
 
     svg.appendChild(g);
   }
 
-  // ---- center node last (largest, on top) ----
+  // ---- center card last (largest, on top) ----
   const cg = svgEl('g', { class: 'ego-node ego-center' });
   const cTip = svgEl('title');
   // Typed-query center is the "best match" with a cosine score; a 3.6a pivot center has no
@@ -1274,16 +1338,13 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
     : '';
   cTip.textContent = `${center.title || '(untitled)'}${centerScoreSuffix}`;
   cg.appendChild(cTip);
-  cg.appendChild(svgEl('circle', {
-    cx: G.cx, cy: G.cy, r: G.centerR,
+  cg.appendChild(svgEl('rect', {
+    x: G.cx - G.centerW / 2, y: G.cy - G.centerH / 2,
+    width: G.centerW, height: G.centerH, rx: 12,
     fill: C_CENTER_FILL, stroke: C_CENTER_FILL, 'stroke-width': 1.5
   }));
-  const cLabel = svgEl('text', {
-    x: G.cx, y: G.cy + 4, 'text-anchor': 'middle',
-    'font-size': 12, 'font-weight': 600, fill: C_CENTER_LABEL, class: 'ego-label'
-  });
-  cLabel.textContent = truncateLabel(center.title, G.labelC / 2); // fits inside node
-  cg.appendChild(cLabel);
+  // Title INSIDE the card, two-line clamp (same labelChars as the neighbours), bold center ink.
+  appendCardLabel(cg, center.title, G.cx, G.cy, G.labelChars, C_CENTER_LABEL, 600);
   // (3.7→tap-ios) SINGLE click/tap on the center opens its FULL memo (already in hand). The
   // center is not a pivot target — no competing action, no disambiguator — and dblclick is
   // unreliable on iOS SVG, so single-tap is the dependable affordance.
