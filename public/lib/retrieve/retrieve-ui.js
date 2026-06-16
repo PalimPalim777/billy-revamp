@@ -1,4 +1,4 @@
-// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay + 3.8a sparse caption + 3.8b disambig hoist + 3.8c mobile profile) —
+// Retrieve tab (milestone 3.3 + 3.4a/3.4b ego-graph + 3.5 inter-neighbor edges + 3.6a pivot + 3.6c neighbor floor + 3.7 memo overlay + 3.8a sparse caption + 3.8b disambig hoist + 3.8c mobile profile + 5.1 retrieve thread) —
 // typed-query sweep + single-center selection (3.2c), a CENTER-ONLY streaming written summary
 // ABOVE (3.3), and the ego-graph BETWEEN the summary and the center card: the 3.4a data layer
 // (read+decrypt the center's connection blob, N-fetch each shown neighbor's content) now
@@ -35,6 +35,14 @@
 // ui-retrieve-graph: dark-theme paint migration (colors only, no logic)
 // ui-breadcrumb-row: crumb chip restyle + Return-to-origin pinned right (paint/layout only)
 // graph-tap-ios: manual same-node double-tap detection; dblclick wiring removed; center opens on single tap
+// (5.1 retrieve thread) #retrieveResult is now an APPEND-AND-KEEP scrollback of "verses" (one per
+// typed turn) instead of a single-live-cluster that wiped on every query. Each verse owns its DOM
+// (an always-visible chip showing query + resolved center title, plus a body holding the cluster)
+// AND all of its cluster-interaction state (trail / breadcrumbs / nav guard / single-click pivot
+// timer) — these moved OUT of the mount closure and ONTO the per-verse object so multiple live
+// clusters never collide. One verse is expanded at a time (collapse = display:none, NEVER teardown,
+// so a collapsed verse keeps its drill state). PURE client-side rearrangement: zero new LLM calls,
+// zero new endpoints, zero E2EE-surface change; every turn is still a fresh standalone sweep (R1).
 import { startLoadingEmbeddingModel, embedText, base64ToFloat32Array, topKNeighbors } from '/lib/embeddings.js';
 import { getSessionDEK } from '/crypto/session-dek.js';
 import { decryptStringWithDEK } from '/crypto/dek.js';
@@ -114,18 +122,16 @@ export function mountRetrieve(container) {
   // Idempotent and shared with capture (same module instance) — never double-fetches.
   startLoadingEmbeddingModel().catch(err => console.warn('[retrieve] model warm failed:', err));
 
+  // inFlight serializes SUBMITS (one typed sweep at a time). It is NOT cluster-interaction state,
+  // so it stays here, global to the mount. (5.1) ALL per-cluster exploration state — trail,
+  // breadcrumb container, nav guard, single-click disambiguation timer — now lives on the per-verse
+  // object built by createVerse() (see module-level verses[]/activeVerseIndex), so multiple live
+  // clusters in the scrollback never collide.
   let inFlight = false;
 
-  // ---- 3.6b breadcrumb / return-to-origin state (per-current-cluster) ----
-  // retrieve is single-live-cluster: submit() does result.innerHTML='' on every typed query, so
-  // exploration state belongs to exactly one cluster — a new query resets origin + trail; there is
-  // no scrollback and no per-message keying. Trail invariant: trail[last].memo_id is ALWAYS the
-  // current graph center and trail[0] is the origin. trail[0].memo holds the already-decrypted
-  // typed-query center memo (WITH its cosineScore) so returning to origin re-renders it identically
-  // (badge shown, no center re-fetch); pivot crumbs carry memo:null and are re-fetched on demand.
-  let trail = [];           // array of { memo_id, title, memo }; current center = trail[last]
-  let breadcrumbsEl = null; // the .retrieve-breadcrumbs container for the current cluster
-  let navBusy = false;      // serialize guard for pivot/crumb re-centers
+  // (5.1) Fresh thread per mount: reset the append-and-keep verse scrollback state.
+  verses = [];
+  activeVerseIndex = -1;
 
   function setBusy(b) {
     inFlight = b;
@@ -133,13 +139,94 @@ export function mountRetrieve(container) {
     input.disabled = b;
   }
 
-  // Replace the result region with a single line (plain or error). Never blank.
-  function showMessage(text, isError) {
-    result.innerHTML = '';
+  // (5.1) Build a new verse: a wrapper appended to #retrieveResult holding an always-visible chip
+  // (original query + resolved center title) and a body that holds the cluster (summary →
+  // breadcrumbs → graph → card). Every cluster-interaction handler closes over THIS object, and a
+  // collapsed verse keeps its DOM + drill state untouched (Fork 1 — never torn down / re-rendered).
+  function createVerse(query) {
+    // Drop the idle empty-state once the first real verse appears.
+    const emptyEl = result.querySelector('#retrieveEmpty');
+    if (emptyEl) emptyEl.remove();
+
+    const wrapperEl = document.createElement('div');
+    wrapperEl.className = 'retrieve-verse';
+    wrapperEl.style.margin = '0 0 18px';
+
+    const chipEl = document.createElement('button');
+    chipEl.type = 'button';
+    chipEl.className = 'retrieve-verse-chip';
+    chipEl.style.display = 'block';
+    chipEl.style.width = '100%';
+    chipEl.style.textAlign = 'left';
+    chipEl.style.background = C_NODE_FILL;
+    chipEl.style.color = C_INK;
+    chipEl.style.border = 'none';
+    chipEl.style.borderLeft = '3px solid transparent';
+    chipEl.style.borderRadius = '8px';
+    chipEl.style.padding = '8px 12px';
+    chipEl.style.margin = '0 0 8px';
+    chipEl.style.fontSize = '13px';
+    chipEl.style.cursor = 'pointer';
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'retrieve-verse-body';
+
+    wrapperEl.appendChild(chipEl);
+    wrapperEl.appendChild(bodyEl);
+    result.appendChild(wrapperEl);
+
+    const verse = {
+      index: verses.length,
+      query,
+      centerTitle: null,
+      wrapperEl, chipEl, bodyEl,
+      // ---- per-verse cluster-interaction state (lifted out of the mount closure) ----
+      // Trail invariant: trail[last].memo_id is ALWAYS the current graph center, trail[0] the
+      // origin; trail[0].memo holds the already-decrypted typed-query center (WITH its cosineScore)
+      // so return-to-origin re-renders identically; pivot crumbs carry memo:null, re-fetched on demand.
+      trail: [],               // array of { memo_id, title, memo }; current center = trail[last]
+      breadcrumbsEl: null,     // this verse's .retrieve-breadcrumbs container
+      navBusy: false,          // serialize guard for THIS verse's pivot/crumb re-centers
+      pendingClickTimer: null, // (3.8b→5.1) single-click pivot disambiguation timer — now per-verse
+      pendingClickNode: null,  // memo_id that armed the timer; same-node 2nd tap opens the overlay
+    };
+    verses.push(verse);
+
+    chipEl.addEventListener('click', () => setActiveVerse(verse));
+    updateChip(verse);
+    return verse;
+  }
+
+  // Chip text: the original query, plus the resolved center title once known. textContent only —
+  // a hostile query/title can never inject markup.
+  function updateChip(verse) {
+    verse.chipEl.textContent = verse.centerTitle
+      ? `${verse.query}  ·  ${verse.centerTitle}`
+      : verse.query;
+  }
+
+  // Expand `verse` and collapse whichever verse is currently open (one expanded at a time). Never
+  // tears down or re-renders a collapsed verse — its DOM + drill state persist (Fork 1).
+  function setActiveVerse(verse) {
+    if (activeVerseIndex >= 0 && verses[activeVerseIndex] && verses[activeVerseIndex] !== verse) {
+      const prev = verses[activeVerseIndex];
+      cancelPendingPivot(prev); // don't let a stale single-click pivot fire on a now-hidden verse
+      prev.bodyEl.style.display = 'none';
+      prev.chipEl.style.borderLeftColor = 'transparent';
+    }
+    verse.bodyEl.style.display = '';
+    verse.chipEl.style.borderLeftColor = C_CENTER_FILL;
+    activeVerseIndex = verse.index;
+  }
+
+  // Per-verse message line (working / error) written INTO the verse body — never wipes the
+  // scrollback or any other verse.
+  function showVerseMessage(verse, text, isError) {
+    verse.bodyEl.innerHTML = '';
     const p = document.createElement('p');
     if (isError) p.className = 'err';
     p.textContent = text;
-    result.appendChild(p);
+    verse.bodyEl.appendChild(p);
   }
 
   // Build the 3.2c center card as a detached element; the caller places it BELOW the
@@ -201,7 +288,9 @@ export function mountRetrieve(container) {
   // or right after returning to origin). Past crumbs are clickable pills that jump back; the last
   // crumb is the current center (bold, NOT a button); a trailing "Return to origin" text-button is
   // the explicit affordance. Chips disable while navBusy so a re-center can't be double-fired.
-  function renderBreadcrumbs() {
+  function renderBreadcrumbs(verse) {
+    const breadcrumbsEl = verse.breadcrumbsEl;
+    const trail = verse.trail;
     if (breadcrumbsEl === null) return;
     breadcrumbsEl.innerHTML = '';
     if (trail.length <= 1) {
@@ -234,9 +323,9 @@ export function mountRetrieve(container) {
         btn.style.fontSize = '12px';
         btn.style.fontWeight = '500';
         btn.style.cursor = 'pointer';
-        btn.disabled = navBusy;
-        btn.style.opacity = navBusy ? '0.5' : '1';
-        btn.addEventListener('click', () => goToIndex(i));
+        btn.disabled = verse.navBusy;
+        btn.style.opacity = verse.navBusy ? '0.5' : '1';
+        btn.addEventListener('click', () => goToIndex(verse, i));
         breadcrumbsEl.appendChild(btn);
       } else {
         // Current center → NON-clickable bold label.
@@ -261,38 +350,38 @@ export function mountRetrieve(container) {
     ret.style.padding = '3px 12px';
     ret.style.borderRadius = '999px';
     ret.style.marginLeft = 'auto';
-    ret.style.opacity = navBusy ? '0.5' : '1';
-    ret.disabled = navBusy;
-    ret.addEventListener('click', () => goToIndex(0));
+    ret.style.opacity = verse.navBusy ? '0.5' : '1';
+    ret.disabled = verse.navBusy;
+    ret.addEventListener('click', () => goToIndex(verse, 0));
     breadcrumbsEl.appendChild(ret);
   }
 
   // ---- 3.6b navigation: pivot deeper / jump back (BOTH reuse renderEgoGraphForCenter and add NO
   // network beyond what it already does) ----
 
-  // Neighbor-click target: push a new crumb, then re-center on it (3.6a pivot fetch by id).
-  async function pivotTo(memoId, title) {
-    if (navBusy) return;
-    navBusy = true;
-    trail.push({ memo_id: memoId, title: title || '(untitled)', memo: null });
-    renderBreadcrumbs();                              // new depth; chips disabled while navBusy
-    try { await renderEgoGraphForCenter(memoId); }    // memo omitted → 3.6a pivot fetch
-    finally { navBusy = false; renderBreadcrumbs(); } // re-enable chips
+  // Neighbor-click target: push a new crumb on THIS verse, then re-center on it (3.6a pivot fetch).
+  async function pivotTo(verse, memoId, title) {
+    if (verse.navBusy) return;
+    verse.navBusy = true;
+    verse.trail.push({ memo_id: memoId, title: title || '(untitled)', memo: null });
+    renderBreadcrumbs(verse);                                 // new depth; chips disabled while navBusy
+    try { await renderEgoGraphForCenter(verse, memoId); }     // memo omitted → 3.6a pivot fetch
+    finally { verse.navBusy = false; renderBreadcrumbs(verse); } // re-enable chips
   }
 
-  // Crumb / return-to-origin target: truncate the trail to i, then re-center on trail[i].
-  async function goToIndex(i) {
-    if (navBusy) return;
-    if (i < 0 || i >= trail.length) return;
-    if (i === trail.length - 1) return;               // already current → no-op
-    navBusy = true;
-    trail = trail.slice(0, i + 1);                    // drop everything after i
-    renderBreadcrumbs();
-    const entry = trail[i];
+  // Crumb / return-to-origin target: truncate THIS verse's trail to i, then re-center on trail[i].
+  async function goToIndex(verse, i) {
+    if (verse.navBusy) return;
+    if (i < 0 || i >= verse.trail.length) return;
+    if (i === verse.trail.length - 1) return;                 // already current → no-op
+    verse.navBusy = true;
+    verse.trail = verse.trail.slice(0, i + 1);                // drop everything after i
+    renderBreadcrumbs(verse);
+    const entry = verse.trail[i];
     // Origin (i=0) carries its decrypted memo → preserves the badge and skips a center re-fetch;
     // a pivot crumb carries memo:null → renderEgoGraphForCenter fetches it by id.
-    try { await renderEgoGraphForCenter(entry.memo_id, entry.memo); }
-    finally { navBusy = false; renderBreadcrumbs(); }
+    try { await renderEgoGraphForCenter(verse, entry.memo_id, entry.memo); }
+    finally { verse.navBusy = false; renderBreadcrumbs(verse); }
   }
 
   // ---- 3.6a shared center renderer (typed-query render path AND single-click pivot) ----
@@ -312,22 +401,22 @@ export function mountRetrieve(container) {
   //                  we fetch + decrypt that memo by id via the SAME fetch + decryptStringWithDEK
   //                  + JSON.parse path the neighbor loop uses (no new decrypt helper), and it has
   //                  no cosine score → the card + center node omit the "best match" line.
-  async function renderEgoGraphForCenter(centerMemoId, centerMemo = null) {
-    cancelPendingPivot(); // (3.8b) any re-center (pivot/crumb/return/typed) pre-empts a pending single-click pivot
+  async function renderEgoGraphForCenter(verse, centerMemoId, centerMemo = null) {
+    cancelPendingPivot(verse); // (3.8b) any re-center (pivot/crumb/return/typed) pre-empts a pending single-click pivot
     const isPivot = (centerMemo == null);
     // (3.8c) One viewport snapshot per render drives BOTH the fetch count and the geometry.
     const profile = graphProfile();
 
-    // Replace the prior cluster (graph + center card) so a pivot re-centers in place. The
-    // summary ABOVE (.retrieve-summary) is intentionally NOT matched here → it stays visible
-    // and unchanged. On the first typed-query render there is nothing to remove yet.
-    result.querySelectorAll(':scope > .retrieve-graph, :scope > .memo-card')
+    // (5.1) Replace the prior cluster (graph + center card) WITHIN THIS VERSE's body so a pivot
+    // re-centers in place. The summary + breadcrumbs ABOVE (this verse's own children) are
+    // intentionally NOT matched here → they stay visible and unchanged. Other verses are untouched.
+    verse.bodyEl.querySelectorAll(':scope > .retrieve-graph, :scope > .memo-card')
       .forEach(el => el.remove());
 
     // Graph region first (placeholder); the center card is appended below it once we have the
     // memo → DOM order stays summary → graph → card.
     const { region: graphRegion, bodyEl: graphBody } = buildGraphRegion();
-    result.appendChild(graphRegion);
+    verse.bodyEl.appendChild(graphRegion);
 
     // Pivot path: no DEK / memo in hand. Derive the session DEK, then fetch + decrypt the
     // center's own content by id reusing the SAME path the neighbor loop uses. Every failure
@@ -356,19 +445,20 @@ export function mountRetrieve(container) {
     // on the memo); a pivot has none → null, and the card + center node omit the cosine line.
     const score = (centerMemo && typeof centerMemo.cosineScore === 'number') ? centerMemo.cosineScore : null;
 
-    // Center card BELOW the graph.
-    result.appendChild(buildCenterCard(centerMemo, score));
+    // Center card BELOW the graph (within this verse's body).
+    verse.bodyEl.appendChild(buildCenterCard(centerMemo, score));
 
     // The typed-query path still needs a DEK for the neighbor content/blob reads (its sweep DEK
-    // is out of scope here, and the signature stays at the two documented args). getSessionDEK
-    // is idempotent — re-deriving it from sessionStorage is cheap and never hits the network.
+    // is out of scope here). getSessionDEK is idempotent — re-deriving it from sessionStorage is
+    // cheap and never hits the network.
     if (!dek) dek = await getSessionDEK();
     if (!dek) { showGraphError(graphBody, 'Your session is locked — re-unlock to load neighbors.'); return; }
 
     // Neighbor data layer + ego-graph render (self-contained; never throws). (3.6b) The onPivot
-    // callback routes a NEIGHBOR single-click through pivotTo, which pushes a breadcrumb and then
-    // re-enters this renderer (memo omitted → the 3.6a pivot fetch-by-id path above).
-    await loadAndRenderNeighbors(centerMemoId, centerMemo, score, dek, graphBody, (memoId, title) => pivotTo(memoId, title), profile);
+    // callback routes a NEIGHBOR single-click through pivotTo on THIS verse, which pushes a
+    // breadcrumb and then re-enters this renderer (memo omitted → the 3.6a pivot fetch-by-id path).
+    // `verse` is threaded to renderEgoGraph so its per-verse single-click timer is used.
+    await loadAndRenderNeighbors(centerMemoId, centerMemo, score, dek, graphBody, (memoId, title) => pivotTo(verse, memoId, title), profile, verse);
   }
 
   async function submit() {
@@ -382,20 +472,23 @@ export function mountRetrieve(container) {
     }
     hint.style.display = 'none';
     setBusy(true);
-    showMessage('Searching your memos…', false);
 
-    // (3.7) Per-query reset: a new query starts a fresh cluster, so close any stray full-memo
-    // overlay (and detach its Escape listener) so it can't survive into the new query.
+    // (5.1) Each submit creates a NEW verse appended to the #retrieveResult scrollback, then
+    // expands it (collapsing the previously-active verse). The verse carries ALL per-cluster state,
+    // so prior verses stay live and intact. The working/error/result content goes into verse.bodyEl
+    // — never wiping the scrollback or any other verse.
+    const verse = createVerse(q);
+    setActiveVerse(verse);
+    showVerseMessage(verse, 'Searching your memos…', false);
+
+    // (3.7) Close any stray full-memo overlay (and detach its Escape listener) before the sweep.
     closeAnyMemoOverlay();
-    // (3.6b) New cluster = fresh breadcrumb state (a failed query then leaves no stale trail;
-    // result.innerHTML clears its DOM on the success path anyway).
-    trail = []; breadcrumbsEl = null; navBusy = false;
-    cancelPendingPivot(); // (3.8b) a new query cancels any pending pivot before the async sweep (closes race B)
+    cancelPendingPivot(verse); // (3.8b) keep the invariant explicit (a fresh verse has no pending pivot)
 
     try {
       // The DEK decrypts both corpus embeddings and the center's content.
       const dek = await getSessionDEK();
-      if (!dek) { showMessage('Your session is locked — re-unlock to search.', true); return; }
+      if (!dek) { showVerseMessage(verse, 'Your session is locked — re-unlock to search.', true); return; }
 
       // Embed the BARE query with capture's exact model / pooling / normalization
       // (same imported embedText; no tags fabricated for the query).
@@ -411,8 +504,8 @@ export function mountRetrieve(container) {
         const url = `/api/memos/embeddings?limit=${SWEEP_PAGE_SIZE}`
           + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
         const r = await fetch(url, { method: 'GET', credentials: 'same-origin' });
-        if (r.status === 401) { showMessage('Your session expired — please re-unlock.', true); return; }
-        if (!r.ok) { showMessage(`Couldn't load your memos (HTTP ${r.status}). Try again.`, true); return; }
+        if (r.status === 401) { showVerseMessage(verse, 'Your session expired — please re-unlock.', true); return; }
+        if (!r.ok) { showVerseMessage(verse, `Couldn't load your memos (HTTP ${r.status}). Try again.`, true); return; }
         const page = await r.json();
         for (const m of (page.memos || [])) {
           try {
@@ -429,7 +522,7 @@ export function mountRetrieve(container) {
 
       // Sparse honesty: nothing usable to match against.
       if (candidates.length === 0) {
-        showMessage('Nothing to search yet — capture a few memos first.', false);
+        showVerseMessage(verse, 'Nothing to search yet — capture a few memos first.', false);
         return;
       }
 
@@ -440,9 +533,9 @@ export function mountRetrieve(container) {
       const cr = await fetch(`/api/memos/${encodeURIComponent(center.memo_id)}`, {
         method: 'GET', credentials: 'same-origin'
       });
-      if (cr.status === 401) { showMessage('Your session expired — please re-unlock.', true); return; }
-      if (cr.status === 404) { showMessage('The best match could not be loaded (it may have just been deleted).', true); return; }
-      if (!cr.ok) { showMessage(`Couldn't load the best match (HTTP ${cr.status}). Try again.`, true); return; }
+      if (cr.status === 401) { showVerseMessage(verse, 'Your session expired — please re-unlock.', true); return; }
+      if (cr.status === 404) { showVerseMessage(verse, 'The best match could not be loaded (it may have just been deleted).', true); return; }
+      if (!cr.ok) { showVerseMessage(verse, `Couldn't load the best match (HTTP ${cr.status}). Try again.`, true); return; }
       const content = await cr.json();
 
       let memo;
@@ -450,45 +543,52 @@ export function mountRetrieve(container) {
         const plaintext = await decryptStringWithDEK(content.memo_ciphertext, content.memo_iv, dek);
         memo = JSON.parse(plaintext);
       } catch {
-        showMessage('Found the best match but could not decrypt it.', true);
+        showVerseMessage(verse, 'Found the best match but could not decrypt it.', true);
         return;
       }
 
-      // 3.2c center card + 3.3 streaming summary ABOVE it + the ego-graph BETWEEN them.
-      // Final DOM order: summary → graph → center card. The summary streams into the region
-      // above; the graph + center card are built and filled by the extracted
-      // renderEgoGraphForCenter (the SAME renderer the 3.6a pivot uses). streamSummary AND
-      // renderEgoGraphForCenter each handle their own errors and NEVER throw, so a summary
-      // failure OR a graph/neighbor failure leaves the other regions intact.
-      result.innerHTML = '';
+      // 3.2c center card + 3.3 streaming summary ABOVE it + the ego-graph BETWEEN them, built INTO
+      // this verse's body. DOM order within the body: summary → breadcrumbs → graph → center card.
+      // streamSummary AND renderEgoGraphForCenter each handle their own errors and NEVER throw, so a
+      // summary failure OR a graph/neighbor failure leaves the other regions intact.
+      verse.bodyEl.innerHTML = ''; // clear THIS verse's "Searching…" placeholder (scrollback intact)
       const { region: summaryRegion, textEl: summaryText } = buildSummaryRegion();
-      result.appendChild(summaryRegion);
+      verse.bodyEl.appendChild(summaryRegion);
 
       // Carry the winning cosine score on the (already-decrypted) center memo so the shared
-      // renderer can surface it on the card + center node. A 3.6a pivot has no score → omitted.
+      // renderer can surface it on the center node. A 3.6a pivot has no score → omitted.
       memo.cosineScore = center.score;
 
+      // (5.1) Center resolved → record it on the verse and populate the (always-visible) chip.
+      verse.centerTitle = memo.title || '(untitled)';
+      updateChip(verse);
+
       // (3.6b) Origin = trail[0]: keep the decrypted typed-query center memo (with cosineScore) so
-      // returning to origin re-renders it identically — badge shown, no re-fetch. Mount the
-      // breadcrumb row BETWEEN the summary and the graph; renderEgoGraphForCenter removes only the
-      // graph + card, so the row survives every pivot/crumb. Hidden at depth 1. Final DOM order:
-      // summary → breadcrumbs → graph → card.
-      trail = [{ memo_id: center.memo_id, title: memo.title || '(untitled)', memo }];
-      breadcrumbsEl = buildBreadcrumbsRegion();
-      result.appendChild(breadcrumbsEl);
-      renderBreadcrumbs();
+      // returning to origin re-renders it identically — no re-fetch. Mount the breadcrumb row
+      // BETWEEN the summary and the graph; renderEgoGraphForCenter removes only the graph + card, so
+      // the row survives every pivot/crumb. Hidden at depth 1.
+      verse.trail = [{ memo_id: center.memo_id, title: memo.title || '(untitled)', memo }];
+      verse.breadcrumbsEl = buildBreadcrumbsRegion();
+      verse.bodyEl.appendChild(verse.breadcrumbsEl);
+      renderBreadcrumbs(verse);
 
       // Run the summary stream and the graph + card render in parallel. Both are
       // self-contained: each catches internally and resolves (never rejects), so
       // Promise.all reliably awaits both. setBusy(false) flips only once both finish.
       await Promise.all([
         streamSummary(q, memo, summaryText),
-        renderEgoGraphForCenter(center.memo_id, memo)
+        renderEgoGraphForCenter(verse, center.memo_id, memo)
       ]);
+
+      // (5.1, item 6) Turn 1 now exists → reframe the input to read as "respond to this thread"
+      // rather than "new search". PURE COPY — the query path is unchanged (R1: every turn is still a
+      // fresh standalone sweep). Idempotent across turns.
+      input.placeholder = 'Respond to this thread…';
+      searchBtn.textContent = 'Respond';
     } catch (err) {
       // Most likely the embedding model failed to load (CDN/network); never leave a blank panel.
       console.warn('[retrieve] sweep failed:', err);
-      showMessage("Search failed — the model couldn't load or a network error occurred. Try again.", true);
+      showVerseMessage(verse, "Search failed — the model couldn't load or a network error occurred. Try again.", true);
     } finally {
       setBusy(false);
     }
@@ -617,7 +717,9 @@ function buildGraphRegion() {
 //                 the graph on that neighbor; threaded straight through to renderEgoGraph.
 //   profile     — (3.8c) the per-render geometry profile (desktop/mobile); caps the neighbor
 //                 slice (profile.neighborCount) and is threaded straight to renderEgoGraph.
-async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bodyEl, onPivot, profile) {
+//   verse       — (5.1) the owning verse; threaded straight to renderEgoGraph so the neighbor
+//                 single-click uses THAT verse's per-verse disambiguation timer.
+async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bodyEl, onPivot, profile, verse) {
   const center = { memo_id: centerId, title: (centerMemo && centerMemo.title) || '(untitled)', score: centerScore, memo: centerMemo };
   try {
     // 1) GET the center's blob (ciphertext-only sibling of the content endpoint).
@@ -634,7 +736,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     // memo, or one whose connect pass never finished). Draw the center node ALONE — an
     // honest "no connections yet" graph, distinct from a fetch error. No crash, no ring.
     if (blobResponse.connection_blob_ciphertext == null || blobResponse.connection_blob_iv == null) {
-      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected', profile);
+      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected', profile, verse);
       return;
     }
 
@@ -659,7 +761,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     const allNeighbors = Array.isArray(blob && blob.neighbors) ? blob.neighbors : [];
     if (allNeighbors.length === 0) {
       // The connect pass ran but produced an empty set (e.g. first memo). Lone center node.
-      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected', profile);
+      renderEgoGraph(bodyEl, center, [], [], onPivot, 'unconnected', profile, verse);
       return;
     }
 
@@ -735,7 +837,7 @@ async function loadAndRenderNeighbors(centerId, centerMemo, centerScore, dek, bo
     if (resolved.length === 0) {
       emptyReason = (top.length === 0) ? 'below-floor' : 'unresolved';
     }
-    renderEgoGraph(bodyEl, center, resolved, edges, onPivot, emptyReason, profile);
+    renderEgoGraph(bodyEl, center, resolved, edges, onPivot, emptyReason, profile, verse);
   } catch (err) {
     // Unhandled network/runtime error before any per-neighbor work. Show an inline
     // error; the card + summary above are unaffected.
@@ -1048,17 +1150,21 @@ const SPOKE_MAX_WIDTH = 3.0;
 // click could misfire the single-click pivot before the 2nd click landed.
 const CLICK_DISAMBIG_MS = 350;
 
-// (3.8b) Module-scoped so any re-center path can cancel a still-pending single-click pivot
-// (the timer is armed inside renderEgoGraph but a re-render replaces that function's scope;
-// a shared handle lets renderEgoGraphForCenter + submit cancel a stale timer). Only one
-// retrieve is mounted per page (app.html guards), so module-level transient state is safe.
-let pendingClickTimer = null;
-let pendingClickNode = null; // memo_id that armed the timer; same-node 2nd tap opens the overlay
-function cancelPendingPivot() {
-  if (pendingClickTimer !== null) { clearTimeout(pendingClickTimer); }
-  pendingClickTimer = null;
-  pendingClickNode = null;
+// (3.8b→5.1) The single-click disambiguation timer is now PER-VERSE (verse.pendingClickTimer /
+// verse.pendingClickNode), so a pending pivot on one verse can't be stranded by a re-render OR
+// fired by activity on a different verse. cancelPendingPivot(verse) clears THAT verse's timer; any
+// re-center (pivot/crumb/return/typed) or a collapse pre-empts a stale single-click pivot.
+function cancelPendingPivot(verse) {
+  if (!verse) return;
+  if (verse.pendingClickTimer !== null) { clearTimeout(verse.pendingClickTimer); }
+  verse.pendingClickTimer = null;
+  verse.pendingClickNode = null;
 }
+
+// (5.1) Append-and-keep scrollback state: each typed turn creates a verse (chip + body). Tracked at
+// module scope so the active/expanded verse persists across submits; reset at the top of each mount.
+let verses = [];
+let activeVerseIndex = -1;
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS(SVG_NS, tag);
@@ -1182,7 +1288,7 @@ function egoEmptyCaption(reason) {
 // (no sweep) → its hover then shows the title alone (no "best match · cosine …").
 // (3.8a) emptyReason — when neighbors is empty (lone center), selects the honest caption via
 // egoEmptyCaption ('unconnected' | 'below-floor' | 'unresolved'); ignored when a ring renders.
-function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason = null, profile = null) {
+function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason = null, profile = null, verse = null) {
   const G = profile || GRAPH_PROFILE_DESKTOP; // (3.8c) desktop profile mirrors the bare constants → byte-identical
   bodyEl.innerHTML = '';
   const panel = makeGraphPanel();
@@ -1270,8 +1376,9 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
   }
 
   // ---- neighbour cards (on top of spokes; opaque rects clip the spoke + edge line ends) ----
-  // (3.8b) The single-click disambiguation timer is now MODULE-scoped (pendingClickTimer /
-  // cancelPendingPivot) so a re-render can't strand it; the handlers below reference it by name.
+  // (3.8b→5.1) The single-click disambiguation timer is now PER-VERSE (verse.pendingClickTimer /
+  // cancelPendingPivot(verse)) so a pending pivot on one verse can't be stranded by a re-render or
+  // fired by activity on another verse; the handlers below reference the threaded `verse`.
   for (const p of positions) {
     const g = svgEl('g', { class: 'ego-node ego-neighbor' });
 
@@ -1284,17 +1391,20 @@ function renderEgoGraph(bodyEl, center, neighbors, edges, onPivot, emptyReason =
     if (onPivot) {
       const neighborMemoId = p.n.memo_id;
       g.addEventListener('click', () => {
-        if (pendingClickTimer !== null && pendingClickNode === neighborMemoId) {
-          cancelPendingPivot();
+        // (5.1) Same-node 2nd tap inside the window opens the overlay; otherwise arm a per-verse
+        // single-click pivot. With no verse (defensive), fall back to an immediate pivot.
+        if (verse && verse.pendingClickTimer !== null && verse.pendingClickNode === neighborMemoId) {
+          cancelPendingPivot(verse);
           // (3.7) Open the FULL memo (already in hand on the node) over the cluster.
           if (p.n.memo) openMemoOverlay(p.n.memo);
           return;
         }
-        cancelPendingPivot();
-        pendingClickNode = neighborMemoId;
-        pendingClickTimer = setTimeout(() => {
-          pendingClickTimer = null;
-          pendingClickNode = null;
+        cancelPendingPivot(verse);
+        if (!verse) { onPivot(neighborMemoId, p.n.title); return; }
+        verse.pendingClickNode = neighborMemoId;
+        verse.pendingClickTimer = setTimeout(() => {
+          verse.pendingClickTimer = null;
+          verse.pendingClickNode = null;
           // (3.6b) onPivot(memoId, title) → pivotTo: push a crumb, then re-center (3.6a fetch by id).
           onPivot(neighborMemoId, p.n.title);
         }, CLICK_DISAMBIG_MS);
