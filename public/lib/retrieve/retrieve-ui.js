@@ -509,15 +509,15 @@ function buildSummaryRegion() {
   const region = document.createElement('div');
   region.className = 'retrieve-summary';
   region.style.margin = '0 0 16px';
-
-  const label = document.createElement('p');
-  label.className = 'small';
-  label.textContent = 'Summary';
-  label.style.margin = '0 0 4px';
-  region.appendChild(label);
+  // The visible "Summary" caption is dropped (the italic body below now signals "summary");
+  // keep the semantic for assistive tech via an aria-label on the container.
+  region.setAttribute('aria-label', 'Summary');
 
   const textEl = document.createElement('div');
   textEl.className = 'retrieve-summary-text';
+  // Italic signals this is the LLM summary (replaces the removed label). Set on the persistent
+  // container so it survives streaming — streamSummary only rewrites textEl's text/children.
+  textEl.style.fontStyle = 'italic';
   const waiting = document.createElement('span');
   waiting.className = 'small';
   waiting.textContent = 'Summarizing…';
