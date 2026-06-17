@@ -72,6 +72,10 @@
     .memo-summary { font-size: 13px; font-style: italic; color: #777; margin: 0 0 8px; }
     .memo-tags { font-size: 13px; color: #555; margin: 0 0 8px; }
     .memo-time { font-size: 12px; color: #888; }
+    .memo-links { margin: 8px 0 0; }
+    .memo-links-label { font-size: 13px; color: #555; margin: 0 0 6px; }
+    .memo-link { display: inline-block; font-size: 13px; color: #1a6fc4; border: 1px solid #ccc; border-radius: 999px; padding: 2px 10px; margin: 0 6px 6px 0; text-decoration: none; }
+    .memo-link:hover { background: #f0f0f0; }
   </style>
   <link rel="stylesheet" href="/styles/foundation.css">
 </head>
@@ -324,6 +328,35 @@
       requestAssistantReply();
     }
 
+    // Deterministic URL extraction from the conversation transcript. Forward-only: this is a
+    // client-side addition appended after JSON.parse — old memos simply have no links field.
+    // Returns an array of { url } in first-seen order, deduped.
+    function extractLinks(text) {
+      const matches = (text || '').match(/\bhttps?:\/\/[^\s<>"')\]]+/gi) || [];
+      const seen = new Set();
+      const links = [];
+      for (const url of matches) {
+        if (seen.has(url)) continue;
+        seen.add(url);
+        links.push({ url });
+      }
+      return links;
+    }
+
+    // Remove the extracted URLs from the body so the embedding stays URL-free, then lightly clean
+    // the artifacts the removal leaves behind. Touches nothing that isn't a removed-url leftover.
+    function stripUrlsFromBody(body, links) {
+      let cleaned = body || '';
+      for (const link of links) {
+        cleaned = cleaned.split(link.url).join('');
+      }
+      cleaned = cleaned
+        .replace(/[ \t]+/g, ' ')        // collapse runs of spaces/tabs to a single space
+        .replace(/ ([.,;:!?])/g, '$1')  // drop a space left immediately before punctuation
+        .replace(/[ \t]+$/gm, '');      // trim trailing whitespace on each line
+      return cleaned;
+    }
+
     async function doSynthesize() {
       setCaptureState('synthesizing');
       try {
@@ -340,6 +373,12 @@
           enterError(new Error('SYNTH_PARSE'), doSynthesize);
           return;
         }
+        // Client-side links layer: extract URLs from the user's own turns, attach them to the memo
+        // (rides inside memo_ciphertext when saved — no new field/column), and strip them from the
+        // body so the embedding stays URL-free. The LLM still returns the exact v1 schema.
+        const userText = history.filter(m => m.role === 'user').map(m => m.content).join('\n');
+        memo.links = extractLinks(userText);
+        if (memo.links.length) memo.body = stripUrlsFromBody(memo.body || '', memo.links);
         captureContext = { memo, promptVersion: 'lifeos-capture-v1' };
         saveErr.style.display = 'none';
         saveMemoBtn.disabled = false;
@@ -391,6 +430,35 @@
         time.textContent = 'Time: ' + memo.time_reference;
         memoCardEl.appendChild(time);
       }
+
+      // Linked sources: render the client-extracted URLs as pills. textContent ONLY (never
+      // innerHTML) so a hostile URL/label can never inject markup. Forward-only — absent on old memos.
+      if (Array.isArray(memo.links) && memo.links.length) {
+        const linksEl = document.createElement('div');
+        linksEl.className = 'memo-links';
+
+        const label = document.createElement('div');
+        label.className = 'memo-links-label';
+        label.textContent = 'Linked sources';
+        linksEl.appendChild(label);
+
+        for (const { url, label: linkLabel } of memo.links) {
+          const a = document.createElement('a');
+          a.className = 'memo-link';
+          a.href = url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = linkLabel || domainOf(url);
+          linksEl.appendChild(a);
+        }
+
+        memoCardEl.appendChild(linksEl);
+      }
+    }
+
+    // Display label for a link pill: the bare hostname (www. stripped), or the raw url if unparseable.
+    function domainOf(url) {
+      try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
     }
 
     function showEmbeddingStatus(state) {
