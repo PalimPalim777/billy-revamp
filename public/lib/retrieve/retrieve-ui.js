@@ -35,14 +35,14 @@
 // ui-retrieve-graph: dark-theme paint migration (colors only, no logic)
 // ui-breadcrumb-row: crumb chip restyle + Return-to-origin pinned right (paint/layout only)
 // graph-tap-ios: manual same-node double-tap detection; dblclick wiring removed; center opens on single tap
-// (5.1 retrieve thread) #retrieveResult is now an APPEND-AND-KEEP scrollback of "verses" (one per
+// (5.1 retrieve thread) #retrieveResult is an APPEND-AND-KEEP scrollback of "verses" (one per
 // typed turn) instead of a single-live-cluster that wiped on every query. Each verse owns its DOM
-// (an always-visible chip showing query + resolved center title, plus a body holding the cluster)
-// AND all of its cluster-interaction state (trail / breadcrumbs / nav guard / single-click pivot
-// timer) — these moved OUT of the mount closure and ONTO the per-verse object so multiple live
-// clusters never collide. One verse is expanded at a time (collapse = display:none, NEVER teardown,
-// so a collapsed verse keeps its drill state). PURE client-side rearrangement: zero new LLM calls,
-// zero new endpoints, zero E2EE-surface change; every turn is still a fresh standalone sweep (R1).
+// (a right-aligned user-query bubble plus a full-width answer block holding the cluster) AND all of
+// its cluster-interaction state (trail / breadcrumbs / nav guard / single-click pivot timer) —
+// these moved OUT of the mount closure and ONTO the per-verse object so multiple live clusters
+// never collide. Every verse stays EXPANDED (no collapse/accordion); the answer blocks stack and
+// the user scrolls the thread. PURE client-side rearrangement: zero new LLM calls, zero new
+// endpoints, zero E2EE-surface change; every turn is still a fresh standalone sweep (R1).
 import { startLoadingEmbeddingModel, embedText, base64ToFloat32Array, topKNeighbors } from '/lib/embeddings.js';
 import { getSessionDEK } from '/crypto/session-dek.js';
 import { decryptStringWithDEK } from '/crypto/dek.js';
@@ -125,13 +125,12 @@ export function mountRetrieve(container) {
   // inFlight serializes SUBMITS (one typed sweep at a time). It is NOT cluster-interaction state,
   // so it stays here, global to the mount. (5.1) ALL per-cluster exploration state — trail,
   // breadcrumb container, nav guard, single-click disambiguation timer — now lives on the per-verse
-  // object built by createVerse() (see module-level verses[]/activeVerseIndex), so multiple live
-  // clusters in the scrollback never collide.
+  // object built by createVerse() (see module-level verses[]), so multiple live clusters in the
+  // scrollback never collide.
   let inFlight = false;
 
   // (5.1) Fresh thread per mount: reset the append-and-keep verse scrollback state.
   verses = [];
-  activeVerseIndex = -1;
 
   function setBusy(b) {
     inFlight = b;
@@ -139,10 +138,10 @@ export function mountRetrieve(container) {
     input.disabled = b;
   }
 
-  // (5.1) Build a new verse: a wrapper appended to #retrieveResult holding an always-visible chip
-  // (original query + resolved center title) and a body that holds the cluster (summary →
-  // breadcrumbs → graph → card). Every cluster-interaction handler closes over THIS object, and a
-  // collapsed verse keeps its DOM + drill state untouched (Fork 1 — never torn down / re-rendered).
+  // (5.1) Build a new verse: a wrapper appended to #retrieveResult holding a right-aligned, static
+  // user-query bubble and a full-width answer block that holds the cluster (summary → breadcrumbs →
+  // graph → card). Every cluster-interaction handler closes over THIS object; verses stack and stay
+  // expanded (never torn down / re-rendered, so each keeps its DOM + drill state — Fork 1).
   function createVerse(query) {
     // Drop the idle empty-state once the first real verse appears.
     const emptyEl = result.querySelector('#retrieveEmpty');
@@ -152,26 +151,31 @@ export function mountRetrieve(container) {
     wrapperEl.className = 'retrieve-verse';
     wrapperEl.style.margin = '0 0 18px';
 
-    const chipEl = document.createElement('button');
-    chipEl.type = 'button';
-    chipEl.className = 'retrieve-verse-chip';
-    chipEl.style.display = 'block';
-    chipEl.style.width = '100%';
-    chipEl.style.textAlign = 'left';
-    chipEl.style.background = C_NODE_FILL;
-    chipEl.style.color = C_INK;
-    chipEl.style.border = 'none';
-    chipEl.style.borderLeft = '3px solid transparent';
-    chipEl.style.borderRadius = '8px';
-    chipEl.style.padding = '8px 12px';
-    chipEl.style.margin = '0 0 8px';
-    chipEl.style.fontSize = '13px';
-    chipEl.style.cursor = 'pointer';
+    // Right-aligned user-query bubble: a STATIC label (not a toggle), showing the original query.
+    // textContent only — a hostile query can never inject markup.
+    const bubbleEl = document.createElement('div');
+    bubbleEl.className = 'retrieve-verse-bubble';
+    bubbleEl.style.width = 'fit-content';
+    bubbleEl.style.maxWidth = '85%';
+    bubbleEl.style.marginLeft = 'auto'; // right-align within the column
+    bubbleEl.style.background = '#2a3a4a';
+    bubbleEl.style.color = '#d4e4f7';
+    bubbleEl.style.borderRadius = '16px';
+    bubbleEl.style.borderBottomRightRadius = '4px'; // tail toward the user side
+    bubbleEl.style.padding = '10px 14px';
+    bubbleEl.style.fontSize = '13px';
+    bubbleEl.textContent = query;
 
+    // Full-width answer block: left-flush, full column width, NOT a bubble. Holds the cluster.
     const bodyEl = document.createElement('div');
     bodyEl.className = 'retrieve-verse-body';
+    bodyEl.style.background = '#252525';
+    bodyEl.style.color = '#d0d0d0';
+    bodyEl.style.borderRadius = '12px';
+    bodyEl.style.padding = '14px';
+    bodyEl.style.marginTop = '8px';
 
-    wrapperEl.appendChild(chipEl);
+    wrapperEl.appendChild(bubbleEl);
     wrapperEl.appendChild(bodyEl);
     result.appendChild(wrapperEl);
 
@@ -179,7 +183,7 @@ export function mountRetrieve(container) {
       index: verses.length,
       query,
       centerTitle: null,
-      wrapperEl, chipEl, bodyEl,
+      wrapperEl, bubbleEl, bodyEl,
       // ---- per-verse cluster-interaction state (lifted out of the mount closure) ----
       // Trail invariant: trail[last].memo_id is ALWAYS the current graph center, trail[0] the
       // origin; trail[0].memo holds the already-decrypted typed-query center (WITH its cosineScore)
@@ -192,31 +196,7 @@ export function mountRetrieve(container) {
     };
     verses.push(verse);
 
-    chipEl.addEventListener('click', () => setActiveVerse(verse));
-    updateChip(verse);
     return verse;
-  }
-
-  // Chip text: the original query, plus the resolved center title once known. textContent only —
-  // a hostile query/title can never inject markup.
-  function updateChip(verse) {
-    verse.chipEl.textContent = verse.centerTitle
-      ? `${verse.query}  ·  ${verse.centerTitle}`
-      : verse.query;
-  }
-
-  // Expand `verse` and collapse whichever verse is currently open (one expanded at a time). Never
-  // tears down or re-renders a collapsed verse — its DOM + drill state persist (Fork 1).
-  function setActiveVerse(verse) {
-    if (activeVerseIndex >= 0 && verses[activeVerseIndex] && verses[activeVerseIndex] !== verse) {
-      const prev = verses[activeVerseIndex];
-      cancelPendingPivot(prev); // don't let a stale single-click pivot fire on a now-hidden verse
-      prev.bodyEl.style.display = 'none';
-      prev.chipEl.style.borderLeftColor = 'transparent';
-    }
-    verse.bodyEl.style.display = '';
-    verse.chipEl.style.borderLeftColor = C_CENTER_FILL;
-    activeVerseIndex = verse.index;
   }
 
   // Per-verse message line (working / error) written INTO the verse body — never wipes the
@@ -473,12 +453,10 @@ export function mountRetrieve(container) {
     hint.style.display = 'none';
     setBusy(true);
 
-    // (5.1) Each submit creates a NEW verse appended to the #retrieveResult scrollback, then
-    // expands it (collapsing the previously-active verse). The verse carries ALL per-cluster state,
-    // so prior verses stay live and intact. The working/error/result content goes into verse.bodyEl
-    // — never wiping the scrollback or any other verse.
+    // (5.1) Each submit creates a NEW verse appended to the #retrieveResult scrollback. Every verse
+    // stays expanded, so prior verses stay live, visible, and intact. The working/error/result
+    // content goes into verse.bodyEl — never wiping the scrollback or any other verse.
     const verse = createVerse(q);
-    setActiveVerse(verse);
     showVerseMessage(verse, 'Searching your memos…', false);
 
     // (3.7) Close any stray full-memo overlay (and detach its Escape listener) before the sweep.
@@ -559,9 +537,9 @@ export function mountRetrieve(container) {
       // renderer can surface it on the center node. A 3.6a pivot has no score → omitted.
       memo.cosineScore = center.score;
 
-      // (5.1) Center resolved → record it on the verse and populate the (always-visible) chip.
+      // (5.1) Center resolved → record it on the verse (downstream R2 reads verse.centerTitle; the
+      // query bubble above stays the user's question only and is not rewritten here).
       verse.centerTitle = memo.title || '(untitled)';
-      updateChip(verse);
 
       // (3.6b) Origin = trail[0]: keep the decrypted typed-query center memo (with cosineScore) so
       // returning to origin re-renders it identically — no re-fetch. Mount the breadcrumb row
@@ -1153,7 +1131,7 @@ const CLICK_DISAMBIG_MS = 350;
 // (3.8b→5.1) The single-click disambiguation timer is now PER-VERSE (verse.pendingClickTimer /
 // verse.pendingClickNode), so a pending pivot on one verse can't be stranded by a re-render OR
 // fired by activity on a different verse. cancelPendingPivot(verse) clears THAT verse's timer; any
-// re-center (pivot/crumb/return/typed) or a collapse pre-empts a stale single-click pivot.
+// re-center (pivot/crumb/return/typed) pre-empts a stale single-click pivot.
 function cancelPendingPivot(verse) {
   if (!verse) return;
   if (verse.pendingClickTimer !== null) { clearTimeout(verse.pendingClickTimer); }
@@ -1161,10 +1139,10 @@ function cancelPendingPivot(verse) {
   verse.pendingClickNode = null;
 }
 
-// (5.1) Append-and-keep scrollback state: each typed turn creates a verse (chip + body). Tracked at
-// module scope so the active/expanded verse persists across submits; reset at the top of each mount.
+// (5.1) Append-and-keep scrollback state: each typed turn creates a verse (query bubble + answer
+// block). Tracked at module scope so the thread persists across submits; reset at the top of each
+// mount. Verses stay expanded and stacked — there is no active/collapsed verse to track.
 let verses = [];
-let activeVerseIndex = -1;
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS(SVG_NS, tag);
