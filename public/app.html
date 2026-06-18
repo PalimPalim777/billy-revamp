@@ -99,6 +99,42 @@
       flex: 1 1 auto; overflow-y: auto; width: 100%; max-width: 560px; margin: 0 auto;
       padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box;
     }
+    /* unified-toggle-shell: persistent bottom input row (toggle · input · send). A flex child of
+       body.app-shell, so it sits below the scrollable <main> with no overlap; shown only on the
+       authenticated capture surface (toggled with the top bar in show()). */
+    .input-bar {
+      flex: 0 0 auto; background: var(--bg); border-top: 1px solid var(--separator);
+      padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+    }
+    .input-bar.hidden { display: none; }
+    .input-bar-inner {
+      display: flex; align-items: center; gap: 8px; width: 100%; max-width: 560px; margin: 0 auto;
+    }
+    .mode-btn {
+      flex: 0 0 auto; width: 44px; height: 44px; border-radius: 999px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: #252525; border: 1px solid #333; color: var(--text-2); cursor: pointer;
+    }
+    .mode-btn:active { transform: scale(0.96); }
+    .mode-btn.retrieve { border-color: #4a6a8a; color: #7aaadd; }
+    .mode-btn .icon-search { display: none; }
+    .mode-btn.retrieve .icon-pencil { display: none; }
+    .mode-btn.retrieve .icon-search { display: block; }
+    .bar-input {
+      flex: 1 1 auto; min-width: 0; height: 44px; padding: 0 16px; border-radius: 999px;
+      background: var(--surface); color: var(--text); border: 1px solid transparent; font-size: 16px;
+    }
+    .bar-input:focus { outline: none; border-color: var(--separator); }
+    .send-btn {
+      flex: 0 0 auto; width: 44px; height: 44px; border-radius: 999px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--surface-2); color: var(--text); border: 0; cursor: pointer;
+    }
+    .send-btn:active:not(:disabled) { transform: scale(0.96); }
+    .send-btn:disabled, .bar-input:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* the bar now owns capture's conversational input; hide the legacy in-column textarea + Send
+       (End & synthesize stays; capture-as-chat re-skins this surface next). */
+    #captureInput, #sendBtn { display: none; }
   </style>
   <link rel="stylesheet" href="/styles/foundation.css">
 </head>
@@ -138,14 +174,7 @@
     </section>
 
     <section id="captureView" class="view">
-      <!-- Mode toggle (Capture | Retrieve). Lives inside #captureView, so it is
-           only ever visible in the onboarded+unlocked surface; the onboarding
-           key-paste view (#onboardView) never shows it. Capture is active on every
-           load of /app; last-used mode is intentionally not persisted in 3.1. -->
-      <div class="seg mode-toggle" id="modeToggle">
-        <button id="modeCaptureBtn" class="seg-btn active" type="button" aria-pressed="true">Capture</button>
-        <button id="modeRetrieveBtn" class="seg-btn" type="button" aria-pressed="false">Retrieve</button>
-      </div>
+      <!-- Mode toggle moved to the unified bottom input row (see #inputBar / #modeBtn). -->
 
       <!-- Capture surface, wrapped only. Its markup, element IDs and event
            bindings are unchanged; the wrapper just lets it be hidden/shown on a
@@ -202,6 +231,26 @@
       <div id="retrieve-mode" class="hidden"></div>
     </section>
   </main>
+  <footer class="input-bar hidden" id="inputBar">
+    <div class="input-bar-inner">
+      <button class="mode-btn" id="modeBtn" type="button" aria-label="Switch to retrieve">
+        <svg class="icon-pencil" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M14.06 2.94a1.5 1.5 0 0 1 2.12 0l.88.88a1.5 1.5 0 0 1 0 2.12L7.5 15.5l-3.5 1 1-3.5 9.06-9.06z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+        <svg class="icon-search" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M13.2 13.2L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <input class="bar-input" id="barInput" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="What's on your mind?">
+      <button class="send-btn" id="barSend" type="button" aria-label="Send">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M17 3L9 11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M17 3l-5.5 14-3-6-6-3L17 3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </footer>
 
   <script type="module">
     import { getSessionDEK, clearSessionDEK } from '/crypto/session-dek.js';
@@ -229,9 +278,11 @@
       onboardView.classList.remove('active');
       captureView.classList.remove('active');
       view.classList.add('active');
-      // The top bar is chrome for the authenticated capture screen only — hide it during
-      // #loading / #onboardView. show() receives the view ELEMENT, so compare against captureView.
-      document.getElementById('appBar').classList.toggle('hidden', view !== captureView);
+      // The top bar AND the bottom input row are chrome for the authenticated capture screen
+      // only — hide both during #loading / #onboardView. show() receives the view ELEMENT.
+      const onApp = (view === captureView);
+      document.getElementById('appBar').classList.toggle('hidden', !onApp);
+      document.getElementById('inputBar').classList.toggle('hidden', !onApp);
     }
 
     // ----- Capture flow -----
@@ -262,8 +313,10 @@
     let synthesisPrompt = null;
     let pendingRetry = null;
     let captureContext = null;
+    let currentCapState = 'entry'; // mirrors the active cap-state so the bottom bar can route sends
 
     function setCaptureState(s) {
+      currentCapState = s;
       for (const k in capStates) capStates[k].classList.remove('active');
       capStates[s].classList.add('active');
     }
@@ -296,9 +349,10 @@
 
     function setControls(busy) {
       const hasUser = history.some(m => m.role === 'user');
-      captureInput.disabled = busy;
-      sendBtn.disabled = busy;
+      captureInput.disabled = busy; // hidden, kept as the capture-busy proxy read on a mode switch
+      sendBtn.disabled = busy;      // hidden
       endBtn.disabled = busy || !hasUser;
+      setBarEnabled(!busy);         // the bottom bar is capture's live input now
     }
 
     function errorInfo(code) {
@@ -343,7 +397,7 @@
       renderMessages();
       setCaptureState('capturing');
       setControls(false);
-      captureInput.focus();
+      barInput.focus();
     }
 
     async function requestAssistantReply() {
@@ -355,7 +409,7 @@
         history.push({ role: 'assistant', content: billyText });
         renderMessages();
         setControls(false);
-        captureInput.focus();
+        barInput.focus();
       } catch (err) {
         enterError(err, requestAssistantReply);
       }
@@ -367,6 +421,14 @@
       if (!text) return;
       history.push({ role: 'user', content: text });
       captureInput.value = '';
+      renderMessages();
+      requestAssistantReply();
+    }
+
+    // Send a capture turn from arbitrary text (the unified bottom bar feeds this). Mirrors doSend
+    // but takes the text as a param instead of reading the now-hidden in-column textarea.
+    function captureSendText(text) {
+      history.push({ role: 'user', content: text });
       renderMessages();
       requestAssistantReply();
     }
@@ -652,50 +714,138 @@
       window.location.href = '/api/auth/logout';
     });
 
-    // ----- Mode toggle (Capture | Retrieve) -----
-    // Switching only hides/shows the two wrappers — it never destroys or
-    // re-renders the capture DOM, so capture state survives a round-trip.
-    // Retrieve is mounted lazily on first selection; nothing here touches the
-    // key, the DEK, the embedding model, the LLM, or the network.
-    const modeCaptureBtn = document.getElementById('modeCaptureBtn');
-    const modeRetrieveBtn = document.getElementById('modeRetrieveBtn');
+    // ----- Unified mode toggle (one round button in the bottom input row) -----
+    // The toggle flips the whole surface between capture and retrieve: it swaps the two
+    // scrollbacks (each keeps its own scroll position), swaps the button icon + accent + the
+    // shared input's placeholder, and routes the shared input's submit to the active mode.
+    // Retrieve is still mounted lazily on first switch; nothing here touches the key, DEK,
+    // embedding model, LLM, or network. Capture state survives a round-trip (DOM is only
+    // hidden/shown, never re-rendered). The bottom bar is now capture's live conversational
+    // input (the in-column textarea is hidden) AND retrieve's query input (decoupled from
+    // retrieve-ui.js, which no longer mounts its own row — it exposes submitQuery instead).
+    const modeBtn = document.getElementById('modeBtn');
+    const barInput = document.getElementById('barInput');
+    const barSend = document.getElementById('barSend');
     const captureModeView = document.getElementById('capture-mode');
     const retrieveModeView = document.getElementById('retrieve-mode');
-    let retrieveMounted = false;
+    const scrollEl = document.querySelector('main');
 
-    function showCaptureMode() {
-      retrieveModeView.classList.add('hidden');
-      captureModeView.classList.remove('hidden');
-      modeRetrieveBtn.classList.remove('active');
-      modeRetrieveBtn.setAttribute('aria-pressed', 'false');
-      modeCaptureBtn.classList.add('active');
-      modeCaptureBtn.setAttribute('aria-pressed', 'true');
+    let currentMode = 'capture';
+    let retrieveMounted = false;
+    let retrieveController = null;            // { submitQuery, isBusy } from mountRetrieve
+    let captureScroll = 0;
+    let retrieveScroll = 0;
+    let retrievePlaceholder = 'What are you looking for?'; // reframes to "Respond to this thread…" after turn 1
+
+    // Enable/disable the bottom bar, but only while it belongs to capture (retrieve drives its own
+    // busy state via onBusyChange). Guards against a capture request that finishes after the user
+    // has already toggled to retrieve.
+    function setBarEnabled(enabled) {
+      if (currentMode !== 'capture') return;
+      barInput.disabled = !enabled;
+      barSend.disabled = !enabled;
     }
 
-    async function showRetrieveMode() {
-      modeCaptureBtn.classList.remove('active');
-      modeCaptureBtn.setAttribute('aria-pressed', 'false');
-      modeRetrieveBtn.classList.add('active');
-      modeRetrieveBtn.setAttribute('aria-pressed', 'true');
-      captureModeView.classList.add('hidden');
-      retrieveModeView.classList.remove('hidden');
-      if (retrieveMounted) return;          // already imported + mounted: just show it
-      retrieveMounted = true;               // set before await so a rapid 2nd click can't double-mount
-      try {
-        const mod = await import('/lib/retrieve/retrieve-ui.js');
-        mod.mountRetrieve(retrieveModeView);
-      } catch (err) {
-        retrieveMounted = false;            // allow a retry on a later switch
-        retrieveModeView.innerHTML = '';    // never leave the panel blank
+    function applyModeChrome(mode) {
+      if (mode === 'capture') {
+        modeBtn.classList.remove('retrieve');
+        modeBtn.setAttribute('aria-label', 'Switch to retrieve');
+        barInput.placeholder = "What's on your mind?";
+      } else {
+        modeBtn.classList.add('retrieve');
+        modeBtn.setAttribute('aria-label', 'Switch to capture');
+        barInput.placeholder = retrievePlaceholder;
+      }
+    }
+
+    function ensureRetrieveMounted() {
+      if (retrieveMounted) return Promise.resolve();
+      retrieveMounted = true;                 // set before await so a rapid 2nd switch can't double-mount
+      return import('/lib/retrieve/retrieve-ui.js').then(mod => {
+        retrieveController = mod.mountRetrieve(retrieveModeView, {
+          onBusyChange: (b) => { if (currentMode === 'retrieve') { barInput.disabled = b; barSend.disabled = b; } },
+          onPlaceholderChange: (text) => { retrievePlaceholder = text; if (currentMode === 'retrieve') barInput.placeholder = text; }
+        });
+      }).catch(err => {
+        retrieveMounted = false;              // allow a retry on a later switch
+        retrieveModeView.innerHTML = '';      // never leave the panel blank
         const p = document.createElement('p');
         p.className = 'err';
         p.textContent = "Couldn't load Retrieve. Refresh and try again.";
         retrieveModeView.appendChild(p);
+      });
+    }
+
+    function switchToCapture() {
+      if (currentMode === 'capture') return;
+      retrieveScroll = scrollEl.scrollTop;
+      retrieveModeView.classList.add('hidden');
+      captureModeView.classList.remove('hidden');
+      currentMode = 'capture';
+      applyModeChrome('capture');
+      barInput.value = '';
+      const busy = captureInput.disabled;     // capture-busy proxy maintained by setControls
+      barInput.disabled = busy; barSend.disabled = busy;
+      scrollEl.scrollTop = captureScroll;
+      barInput.focus();
+    }
+
+    function switchToRetrieve() {
+      if (currentMode === 'retrieve') return;
+      captureScroll = scrollEl.scrollTop;
+      captureModeView.classList.add('hidden');
+      retrieveModeView.classList.remove('hidden');
+      currentMode = 'retrieve';
+      applyModeChrome('retrieve');
+      barInput.value = '';
+      scrollEl.scrollTop = retrieveScroll;
+      if (!retrieveMounted) {
+        barInput.disabled = true; barSend.disabled = true;   // until the module + UI are ready
+        ensureRetrieveMounted().then(() => {
+          if (currentMode === 'retrieve') { barInput.disabled = false; barSend.disabled = false; barInput.focus(); }
+        });
+      } else {
+        const busy = retrieveController ? retrieveController.isBusy() : false;
+        barInput.disabled = busy; barSend.disabled = busy;
+        barInput.focus();
       }
     }
 
-    modeCaptureBtn.addEventListener('click', showCaptureMode);
-    modeRetrieveBtn.addEventListener('click', showRetrieveMode);
+    // Capture-mode send from the bottom bar: auto-start a capture on the first send (entry),
+    // otherwise push a turn. Other cap-states (synthesizing/memo/saved/error) leave the typed text
+    // in place and do nothing, so it is never silently lost.
+    async function captureBarSend() {
+      if (barInput.disabled) return;
+      const text = barInput.value.trim();
+      if (!text) return;
+      if (currentCapState === 'entry') {
+        barInput.value = '';
+        await startCapture();                 // transitions to 'capturing' (or 'error')
+        if (currentCapState !== 'capturing') return;
+        captureSendText(text);
+      } else if (currentCapState === 'capturing') {
+        barInput.value = '';
+        captureSendText(text);
+      }
+    }
+
+    function barSendAction() {
+      if (currentMode === 'capture') { captureBarSend(); return; }
+      if (barInput.disabled) return;
+      const text = barInput.value.trim();
+      if (!text) return;
+      barInput.value = '';
+      if (retrieveController) retrieveController.submitQuery(text);
+    }
+
+    modeBtn.addEventListener('click', () => { if (currentMode === 'capture') switchToRetrieve(); else switchToCapture(); });
+    barSend.addEventListener('click', barSendAction);
+    barInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); barSendAction(); }
+    });
+
+    // Paint the initial (capture) chrome.
+    applyModeChrome('capture');
 
     // ----- Load flow -----
     let dek = null;

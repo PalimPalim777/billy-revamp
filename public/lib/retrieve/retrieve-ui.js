@@ -73,40 +73,20 @@ const NEIGHBOR_DISPLAY_THRESHOLD = 0.5;
 // edge is drawn (the graph is not a complete mesh).
 const INTER_NEIGHBOR_EDGE_THRESHOLD = 0.6;
 
-export function mountRetrieve(container) {
+export function mountRetrieve(container, opts = {}) {
   // app.html guards against a second mount, but clear defensively so a stray
   // re-call can never stack a duplicate UI inside the container.
   container.innerHTML = '';
 
-  // Query row: a single-line input (Enter submits) plus a Search button.
-  const row = document.createElement('div');
-  row.className = 'row';
+  // The unified shell (app.html #inputBar) now owns the query input. This module no longer mounts
+  // its own input row; it exposes submitQuery(text) and reports state through callbacks:
+  //   opts.onBusyChange(bool)        — disable/enable the shell's input + send during a sweep
+  //   opts.onPlaceholderChange(text) — reframe the shell's placeholder after turn 1
+  const onBusyChange = typeof opts.onBusyChange === 'function' ? opts.onBusyChange : () => {};
+  const onPlaceholderChange = typeof opts.onPlaceholderChange === 'function' ? opts.onPlaceholderChange : () => {};
+  let placeholderReframed = false;
 
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.id = 'retrieveQuery';
-  input.autocomplete = 'off';
-  input.setAttribute('autocapitalize', 'none');
-  input.spellcheck = false;
-  input.placeholder = 'Ask a question…';
-
-  const searchBtn = document.createElement('button');
-  searchBtn.type = 'button';
-  searchBtn.id = 'retrieveSearchBtn';
-  searchBtn.textContent = 'Search';
-
-  row.appendChild(input);
-  row.appendChild(searchBtn);
-
-  // Inline hint for empty submits. Separate from the result region so an empty
-  // submit never disturbs the idle empty-state or a prior result.
-  const hint = document.createElement('p');
-  hint.id = 'retrieveHint';
-  hint.className = 'small';
-  hint.style.display = 'none';
-  hint.textContent = 'Type a question to search.';
-
-  // Result region: idle empty-state now; working state / result card / messages later.
+  // Result region: idle empty-state now; the verse scrollback fills it on submit.
   const result = document.createElement('div');
   result.id = 'retrieveResult';
   const empty = document.createElement('p');
@@ -114,8 +94,6 @@ export function mountRetrieve(container) {
   empty.textContent = 'Ask a question to search your memos.';
   result.appendChild(empty);
 
-  container.appendChild(row);
-  container.appendChild(hint);
   container.appendChild(result);
 
   // Warm the embedding model when the tab opens so the first query is fast.
@@ -134,8 +112,7 @@ export function mountRetrieve(container) {
 
   function setBusy(b) {
     inFlight = b;
-    searchBtn.disabled = b;
-    input.disabled = b;
+    onBusyChange(b);
   }
 
   // (5.1) Build a new verse: a wrapper appended to #retrieveResult holding a right-aligned, static
@@ -441,16 +418,10 @@ export function mountRetrieve(container) {
     await loadAndRenderNeighbors(centerMemoId, centerMemo, score, dek, graphBody, (memoId, title) => pivotTo(verse, memoId, title), profile, verse);
   }
 
-  async function submit() {
+  async function submitQuery(q) {
     if (inFlight) return;
-    const q = input.value.trim();
-    if (!q) {
-      // Empty / whitespace-only: keep the 3.1 hint behaviour, no sweep.
-      hint.style.display = 'block';
-      input.focus();
-      return;
-    }
-    hint.style.display = 'none';
+    q = (q || '').trim();
+    if (!q) return;                 // the shell guards empties; nothing to do here
     setBusy(true);
 
     // (5.1) Each submit creates a NEW verse appended to the #retrieveResult scrollback. Every verse
@@ -558,11 +529,10 @@ export function mountRetrieve(container) {
         renderEgoGraphForCenter(verse, center.memo_id, memo)
       ]);
 
-      // (5.1, item 6) Turn 1 now exists → reframe the input to read as "respond to this thread"
-      // rather than "new search". PURE COPY — the query path is unchanged (R1: every turn is still a
-      // fresh standalone sweep). Idempotent across turns.
-      input.placeholder = 'Respond to this thread…';
-      searchBtn.textContent = 'Respond';
+      // (5.1, item 6) Turn 1 now exists → ask the shell to reframe its placeholder to read as
+      // "respond to this thread" rather than "new search". PURE COPY — the query path is unchanged
+      // (R1: every turn is still a fresh standalone sweep). Fired once.
+      if (!placeholderReframed) { onPlaceholderChange('Respond to this thread…'); placeholderReframed = true; }
     } catch (err) {
       // Most likely the embedding model failed to load (CDN/network); never leave a blank panel.
       console.warn('[retrieve] sweep failed:', err);
@@ -572,11 +542,8 @@ export function mountRetrieve(container) {
     }
   }
 
-  searchBtn.addEventListener('click', submit);
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); submit(); }
-  });
-  input.addEventListener('input', () => { hint.style.display = 'none'; });
+  // The shell drives submits through this controller (no internal input row / listeners).
+  return { submitQuery, isBusy: () => inFlight };
 }
 
 // ---- 3.3 streaming summary helpers (CENTER-ONLY; no neighbor context) ----
