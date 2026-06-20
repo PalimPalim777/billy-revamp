@@ -148,11 +148,13 @@
       </svg>
     </button>
     <span class="app-bar-title">Billy</span>
-    <button class="app-bar-btn" id="clearBtn" aria-label="Clear" type="button">
+    <button class="app-bar-btn" id="clearBtn" aria-label="Sign out" type="button">
+      <!-- Temporary Sign out (was the deferred trash/clear placeholder). The menu drawer (#4) will
+           own Sign out; this reverts to its deferred top-right role then. -->
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-        <path d="M3 5h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-        <path d="M8 2.5h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-        <path d="M5 5l1 11.5a1.5 1.5 0 0 0 1.5 1.5h5a1.5 1.5 0 0 0 1.5-1.5L16 5" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M8 17H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M13 14l4-4-4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M17 10H8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
       </svg>
     </button>
   </header>
@@ -180,12 +182,11 @@
            bindings are unchanged; the wrapper just lets it be hidden/shown on a
            mode switch without ever being destroyed or re-rendered. -->
       <div id="capture-mode">
-      <div id="st-entry" class="cap-state">
-        <h1>Billy — you're set up.</h1>
-        <p id="connectedLine" class="connected" style="display:none">Anthropic key connected ✓</p>
-        <div><button id="startBtn">Start capture</button></div>
-        <p class="small"><a id="signout" href="/api/auth/logout">Sign out</a></p>
-      </div>
+      <!-- Empty initial state: capture lands here as a blank scrollback and the bottom bar is
+           ready. Typing + send auto-starts the capture (loads prompts → 'capturing'). The old
+           "Start capture / key-connected / Sign out" entry screen is gone; Sign out is temporarily
+           on the top-bar button until the menu drawer (#4) takes it over. -->
+      <div id="st-entry" class="cap-state"></div>
 
       <div id="st-capturing" class="cap-state">
         <div id="messages" class="messages"></div>
@@ -294,7 +295,6 @@
       saved: document.getElementById('st-saved'),
       error: document.getElementById('st-error')
     };
-    const connectedLine = document.getElementById('connectedLine');
     const messagesEl = document.getElementById('messages');
     const captureInput = document.getElementById('captureInput');
     const sendBtn = document.getElementById('sendBtn');
@@ -324,8 +324,7 @@
     function enterEntry() {
       history = [];
       captureContext = null;
-      connectedLine.style.display = getAnthropicKey() ? 'block' : 'none';
-      setCaptureState('entry');
+      setCaptureState('entry'); // 'entry' is now an empty scrollback; the bar auto-starts on first send
       show(captureView);
     }
 
@@ -694,7 +693,6 @@
     }
 
     // Capture listeners (wired once; elements always present in the DOM).
-    document.getElementById('startBtn').addEventListener('click', startCapture);
     saveMemoBtn.addEventListener('click', doSaveMemo);
     document.getElementById('captureAgainBtn').addEventListener('click', enterEntry);
     sendBtn.addEventListener('click', doSend);
@@ -707,7 +705,8 @@
     document.getElementById('errBack').addEventListener('click', (e) => { e.preventDefault(); enterEntry(); });
     retryBtn.addEventListener('click', () => { if (pendingRetry) pendingRetry(); });
 
-    document.getElementById('signout').addEventListener('click', (e) => {
+    // Temporary top-bar Sign out (the #clearBtn button); moves into the menu drawer in #4.
+    document.getElementById('clearBtn').addEventListener('click', (e) => {
       e.preventDefault();
       clearAnthropicKey();
       clearSessionDEK();
