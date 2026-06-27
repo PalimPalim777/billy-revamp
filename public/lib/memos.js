@@ -17,7 +17,11 @@ export async function saveMemo(memo, promptVersion) {
       id,
       memo_ciphertext: ciphertext_b64,
       memo_iv: iv_b64,
-      prompt_version: promptVersion
+      prompt_version: promptVersion,
+      // Chat Mode: present only for write-back transcript-nodes (Branch #5). Capture passes
+      // a plain memo with neither key, so both are undefined and omitted from the request.
+      ...(memo && memo.kind !== undefined ? { kind: memo.kind } : {}),
+      ...(memo && memo.parent_memo_id !== undefined ? { parent_memo_id: memo.parent_memo_id } : {})
     })
   });
 

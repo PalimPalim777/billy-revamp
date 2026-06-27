@@ -89,15 +89,37 @@ module.exports = async function handler(req, res) {
     return;
   }
 
+  // Chat Mode: optional transcript-node discriminator. Omitted by capture -> DB defaults
+  // ('memo' / null). The DB CHECK (memos_parent_rule_check) is the real guarantee; these
+  // early 400s give a clearer error than a 500 surfacing from the constraint. Validate as
+  // a pair so a transcript without a parent (or vice versa) is caught here, not by the DB.
+  if (body.kind !== undefined && body.kind !== 'memo' && body.kind !== 'chat-transcript') {
+    badInput(res, 'kind'); return;
+  }
+  if (body.parent_memo_id !== undefined && body.parent_memo_id !== null && !UUID_RE.test(body.parent_memo_id)) {
+    badInput(res, 'parent_memo_id'); return;
+  }
+  if (body.kind === 'chat-transcript' && !body.parent_memo_id) {
+    badInput(res, 'parent_required_for_transcript'); return;
+  }
+  if (body.parent_memo_id && body.kind !== 'chat-transcript') {
+    badInput(res, 'parent_only_on_transcript'); return;
+  }
+
+  const insertRow = {
+    id: body.id,
+    user_id: payload.uid,
+    memo_ciphertext: body.memo_ciphertext,
+    memo_iv: body.memo_iv,
+    prompt_version: body.prompt_version
+  };
+  // Only set when provided, so capture inserts are byte-for-byte unchanged (DB defaults apply).
+  if (body.kind !== undefined) insertRow.kind = body.kind;
+  if (body.parent_memo_id !== undefined) insertRow.parent_memo_id = body.parent_memo_id;
+
   const { data, error } = await supabase
     .from('memos')
-    .insert({
-      id: body.id,
-      user_id: payload.uid,
-      memo_ciphertext: body.memo_ciphertext,
-      memo_iv: body.memo_iv,
-      prompt_version: body.prompt_version
-    })
+    .insert(insertRow)
     .select('id, created_at')
     .single();
 
