@@ -145,6 +145,7 @@
       <div class="seg mode-toggle" id="modeToggle">
         <button id="modeCaptureBtn" class="seg-btn active" type="button" aria-pressed="true">Capture</button>
         <button id="modeRetrieveBtn" class="seg-btn" type="button" aria-pressed="false">Retrieve</button>
+        <button id="modeChatBtn" class="seg-btn" type="button" aria-pressed="false">Chat</button>
       </div>
 
       <!-- Capture surface, wrapped only. Its markup, element IDs and event
@@ -200,6 +201,15 @@
       <!-- Retrieve surface. Hidden by default (Capture is the default mode).
            Mounted lazily on first switch to Retrieve via dynamic import. -->
       <div id="retrieve-mode" class="hidden"></div>
+
+      <!-- Chat surface (Branch #3: structural stub only). Hidden by default.
+           Branch #4 (revamp/chat-surface) mounts the proposed-chat list + opener
+           flow here. #3 wires the segment + empty peer panel ONLY - no list, no
+           loader/selection import, no LLM, no network. -->
+      <div id="chat-mode" class="hidden">
+        <p class="small">Chat - coming soon.</p>
+        <!-- #4 mount point -->
+      </div>
     </section>
   </main>
 
@@ -652,33 +662,48 @@
       window.location.href = '/api/auth/logout';
     });
 
-    // ----- Mode toggle (Capture | Retrieve) -----
-    // Switching only hides/shows the two wrappers — it never destroys or
+    // ----- Mode toggle (Capture | Retrieve | Chat) -----
+    // Switching only hides/shows the mode wrappers — it never destroys or
     // re-renders the capture DOM, so capture state survives a round-trip.
-    // Retrieve is mounted lazily on first selection; nothing here touches the
+    // Retrieve is mounted lazily on first selection. Chat is a structural stub
+    // in Branch #3 (no list, no loader/selection import, no LLM, no network);
+    // Branch #4 mounts the chat surface behind it. Nothing here touches the
     // key, the DEK, the embedding model, the LLM, or the network.
     const modeCaptureBtn = document.getElementById('modeCaptureBtn');
     const modeRetrieveBtn = document.getElementById('modeRetrieveBtn');
+    const modeChatBtn = document.getElementById('modeChatBtn');
     const captureModeView = document.getElementById('capture-mode');
     const retrieveModeView = document.getElementById('retrieve-mode');
+    const chatModeView = document.getElementById('chat-mode');
     let retrieveMounted = false;
 
+    // One mechanism for three peer segments: hide every panel and show the
+    // selected one; clear .active/aria-pressed on every button and set them on
+    // the selected one. Identical per-element ops to the original 2-way handler,
+    // lifted to iterate. Outer scroll stays shared across modes (unchanged from
+    // 2-way behavior); per-mode outer scroll is intentionally NOT added in #3.
+    const MODES = {
+      capture:  { btn: modeCaptureBtn,  view: captureModeView },
+      retrieve: { btn: modeRetrieveBtn, view: retrieveModeView },
+      chat:     { btn: modeChatBtn,     view: chatModeView },
+    };
+
+    function setMode(name) {
+      for (const key of Object.keys(MODES)) {
+        const { btn, view } = MODES[key];
+        const on = key === name;
+        view.classList.toggle('hidden', !on);
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+    }
+
     function showCaptureMode() {
-      retrieveModeView.classList.add('hidden');
-      captureModeView.classList.remove('hidden');
-      modeRetrieveBtn.classList.remove('active');
-      modeRetrieveBtn.setAttribute('aria-pressed', 'false');
-      modeCaptureBtn.classList.add('active');
-      modeCaptureBtn.setAttribute('aria-pressed', 'true');
+      setMode('capture');
     }
 
     async function showRetrieveMode() {
-      modeCaptureBtn.classList.remove('active');
-      modeCaptureBtn.setAttribute('aria-pressed', 'false');
-      modeRetrieveBtn.classList.add('active');
-      modeRetrieveBtn.setAttribute('aria-pressed', 'true');
-      captureModeView.classList.add('hidden');
-      retrieveModeView.classList.remove('hidden');
+      setMode('retrieve');
       if (retrieveMounted) return;          // already imported + mounted: just show it
       retrieveMounted = true;               // set before await so a rapid 2nd click can't double-mount
       try {
@@ -694,8 +719,13 @@
       }
     }
 
+    function showChatMode() {
+      setMode('chat');                      // Branch #3 stub: no mount, no import, no network.
+    }
+
     modeCaptureBtn.addEventListener('click', showCaptureMode);
     modeRetrieveBtn.addEventListener('click', showRetrieveMode);
+    modeChatBtn.addEventListener('click', showChatMode);
 
     // ----- Load flow -----
     let dek = null;
