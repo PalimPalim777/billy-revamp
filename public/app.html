@@ -207,7 +207,6 @@
            flow here. #3 wires the segment + empty peer panel ONLY - no list, no
            loader/selection import, no LLM, no network. -->
       <div id="chat-mode" class="hidden">
-        <p class="small">Chat - coming soon.</p>
         <!-- #4 mount point -->
       </div>
     </section>
@@ -676,6 +675,7 @@
     const retrieveModeView = document.getElementById('retrieve-mode');
     const chatModeView = document.getElementById('chat-mode');
     let retrieveMounted = false;
+    let chatMounted = false;
 
     // One mechanism for three peer segments: hide every panel and show the
     // selected one; clear .active/aria-pressed on every button and set them on
@@ -719,8 +719,21 @@
       }
     }
 
-    function showChatMode() {
-      setMode('chat');                      // Branch #3 stub: no mount, no import, no network.
+    async function showChatMode() {
+      setMode('chat');
+      if (chatMounted) return;
+      chatMounted = true;
+      try {
+        const mod = await import('/lib/chat/chat-ui.js');
+        mod.mountChat(chatModeView);
+      } catch (err) {
+        chatMounted = false;
+        chatModeView.innerHTML = '';
+        const p = document.createElement('p');
+        p.className = 'err';
+        p.textContent = "Couldn't load Chat. Refresh and try again.";
+        chatModeView.appendChild(p);
+      }
     }
 
     modeCaptureBtn.addEventListener('click', showCaptureMode);

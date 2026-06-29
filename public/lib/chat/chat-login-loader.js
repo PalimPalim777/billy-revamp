@@ -86,6 +86,8 @@ export async function loadAndSelectChats({
         para_bucket: parsed.para_bucket,       // decrypted -> bucket filter reads this
         time_reference: parsed.time_reference, // NL-only today; selector does NOT parse it
         due_date: parsed.due_date,             // absent until capture-prompt v2; getDueDate -> null
+        title: parsed.title,                   // #4 chat surface: list label (no new fetch/decrypt)
+        body: parsed.body,                     // #4 chat surface: opener content (no new fetch/decrypt)
       });
       if (row.cooldown_until) cooldownByMemoId.set(row.id, row.cooldown_until); // id -> memo_id
     } catch (e) {
@@ -96,6 +98,11 @@ export async function loadAndSelectChats({
   // 3. Active chat count -> free-slot backpressure (proposed+responded; only ended frees).
   const activeChatCount = await fetchActiveChatCount();
 
-  // 4. Pure, deterministic selection.
-  return selectChats({ memos, centralityByMemoId, cooldownByMemoId, activeChatCount, now, config });
+  // 4. Pure, deterministic selection. #4 chat surface consumes both the ordered
+  //    candidate feed and a memo_id -> decrypted-memo lookup (built from `memos`
+  //    above; no new fetch, no new decrypt) for list labels + opener content.
+  const candidates = selectChats({ memos, centralityByMemoId, cooldownByMemoId, activeChatCount, now, config });
+  const memosById = {};
+  for (const m of memos) memosById[m.memo_id] = m;
+  return { candidates, memosById };
 }
