@@ -39,3 +39,17 @@ export async function loadChatPromptV1() {
   _chatCached = { system: parts[1] };
   return _chatCached;
 }
+
+let _chatHeadlineCached = null;
+
+export async function loadChatHeadlinePromptV1() {
+  if (_chatHeadlineCached) return _chatHeadlineCached;
+  const r = await fetch('/prompts/lifeos-chat-headline-v1.md');
+  if (!r.ok) throw new Error(`PROMPT_FETCH_${r.status}`);
+  const text = await r.text();
+  // File structure: [preamble] --- [Section A: headline system prompt] --- [Versioning]
+  const parts = text.split(/^---\s*$/m).map(s => s.trim());
+  if (parts.length < 2) throw new Error('PROMPT_PARSE');
+  _chatHeadlineCached = { system: parts[1] };
+  return _chatHeadlineCached;
+}
